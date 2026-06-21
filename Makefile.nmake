@@ -1,0 +1,464 @@
+# =============================================================================
+#  OpenLibCLI Library — NMake file  (MSVC toolchain)
+#
+#  Output layout
+#  -------------
+#    build\msvc\windows\binaries\   executables
+#    build\msvc\windows\libs\       static/import libraries and PDB
+#    build\msvc\windows\obj\   object files
+#
+#  Usage
+#  -----
+#    nmake /f Makefile.nmake              build everything
+#    nmake /f Makefile.nmake lib          static library only
+#    nmake /f Makefile.nmake shared       shared library only
+#    nmake /f Makefile.nmake telnet       telnet server example
+#    nmake /f Makefile.nmake uart         serial server example
+#    nmake /f Makefile.nmake tcp          TCP server example
+#    nmake /f Makefile.nmake BUILD_EXAMPLE_PIPE=0
+#
+#  Prerequisites
+#    Run from a Visual Studio "x64 Native Tools Command Prompt", or let
+#    build.bat source vcvars64.bat automatically.
+#      "C:\Program Files\Microsoft Visual Studio\2022\Community\
+#       VC\Auxiliary\Build\vcvars64.bat"
+#
+#  Tested: VS 2019, VS 2022 (cl version 19.x).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+#  Directories — all output under build\msvc\
+# ---------------------------------------------------------------------------
+BUILD_BASE  = build\msvc
+BUILD_DIR   = $(BUILD_BASE)\windows
+BIN_DIR     = $(BUILD_DIR)\binaries
+LIB_DIR     = $(BUILD_DIR)\libs
+OBJ_DIR     = $(BUILD_DIR)\obj
+OBJ_SHARED_DIR = $(OBJ_DIR)\shared
+SRC_DIR     = cli
+INC_DIR     = cli
+EXAMPLE_DIR = examples
+
+!IFNDEF BUILD_EXAMPLE_TELNET
+BUILD_EXAMPLE_TELNET = 1
+!ENDIF
+!IFNDEF BUILD_EXAMPLE_TCP
+BUILD_EXAMPLE_TCP = 0
+!ENDIF
+!IFNDEF BUILD_EXAMPLE_SERIAL
+BUILD_EXAMPLE_SERIAL = 1
+!ENDIF
+!IFNDEF BUILD_EXAMPLE_PIPE
+BUILD_EXAMPLE_PIPE = 0
+!ENDIF
+!IFNDEF BUILD_EXAMPLE_UNIX_SOCKET
+BUILD_EXAMPLE_UNIX_SOCKET = 0
+!ENDIF
+
+!IFNDEF BUILD_LIB_STATIC
+BUILD_LIB_STATIC = 0
+!ENDIF
+!IFNDEF BUILD_LIB_SHARED
+BUILD_LIB_SHARED = 1
+!ENDIF
+
+# ---------------------------------------------------------------------------
+#  Toolchain
+# ---------------------------------------------------------------------------
+CC   = cl.exe
+AR   = lib.exe
+LINK = link.exe
+
+# ---------------------------------------------------------------------------
+#  Compiler flags
+# ---------------------------------------------------------------------------
+# /nologo      suppress banner
+# /W4          high warning level
+# /WX          warnings as errors
+# /std:c11     C11 standard
+# /O2          optimise for speed
+# /Zi          debug info (PDB)
+CFLAGS = /nologo /W4 /WX /std:c11 /O2 /Zi /FS /MT /Gy \
+         /I$(INC_DIR) \
+         /D_CRT_SECURE_NO_WARNINGS \
+         /DWIN32 /D_WIN32 \
+         /Fd$(LIB_DIR)\vc.pdb
+SHARED_CFLAGS  = $(CFLAGS) /DCLI_SHARED /DBUILD_LIB_SHARED /Fd$(LIB_DIR)\openlibcli_dll.pdb
+EXAMPLE_CFLAGS = $(CFLAGS) /DCLI_SHARED
+
+ARFLAGS  = /nologo
+LDFLAGS  = /nologo /DEBUG /OPT:REF /OPT:ICF
+PLAT_LIBS = ws2_32.lib
+
+# ---------------------------------------------------------------------------
+#  Output files  (all land in build\msvc\)
+# ---------------------------------------------------------------------------
+STATIC_LIB   = $(LIB_DIR)\openlibcli_static.lib
+LIB_OUT      = $(SHARED_IMPLIB)
+SHARED_DLL   = $(BIN_DIR)\OpenLibCLI.dll
+SHARED_IMPLIB = $(LIB_DIR)\OpenLibCLI.lib
+SHARED_EXP   = $(LIB_DIR)\OpenLibCLI.exp
+TELNET_BIN   = $(BIN_DIR)\cli_server_telnet.exe
+TCP_BIN      = $(BIN_DIR)\cli_server_tcp.exe
+SERIAL_BIN   = $(BIN_DIR)\cli_server_serial.exe
+PIPE_BIN     = $(BIN_DIR)\cli_server_pipe.exe
+DEMO_OBJ     = $(OBJ_DIR)\demo_config.obj
+
+# ---------------------------------------------------------------------------
+#  Library object files
+# ---------------------------------------------------------------------------
+TELNET_OBJ =
+TELNET_SRC =
+TCP_OBJ =
+TCP_SRC =
+SERIAL_OBJ =
+SERIAL_SRC =
+PIPE_OBJ =
+PIPE_SRC =
+UNIX_SOCKET_OBJ =
+UNIX_SOCKET_SRC =
+TELNET_TARGETS =
+TCP_TARGETS =
+SERIAL_TARGETS =
+PIPE_TARGETS =
+
+!IF "$(BUILD_EXAMPLE_TELNET)" == "1"
+TELNET_TARGETS = telnet
+!ENDIF
+!IF "$(BUILD_EXAMPLE_TCP)" == "1"
+TCP_TARGETS = tcp
+!ENDIF
+!IF "$(BUILD_EXAMPLE_SERIAL)" == "1"
+SERIAL_TARGETS = uart
+!ENDIF
+!IF "$(BUILD_EXAMPLE_PIPE)" == "1"
+PIPE_TARGETS = pipe
+!ENDIF
+
+LIB_OBJS = \
+    $(OBJ_DIR)\cli.obj \
+    $(OBJ_DIR)\utils\cli_args_parse.obj
+
+SHARED_SRCS = $(SRC_DIR)\cli.c $(SRC_DIR)\utils\cli_args_parse.c
+
+ALL_TARGETS = _dirs
+!IF "$(BUILD_LIB_STATIC)" == "1"
+ALL_TARGETS = $(ALL_TARGETS) lib
+!ENDIF
+!IF "$(BUILD_LIB_SHARED)" == "1"
+ALL_TARGETS = $(ALL_TARGETS) shared
+!ENDIF
+ALL_TARGETS = $(ALL_TARGETS) $(TELNET_TARGETS) $(TCP_TARGETS) $(SERIAL_TARGETS) $(PIPE_TARGETS)
+
+# ---------------------------------------------------------------------------
+#  Default target
+# ---------------------------------------------------------------------------
+all: $(ALL_TARGETS)
+    @echo.
+    @echo Build complete  [MSVC cl.exe]
+    @echo   Output dir   : $(BUILD_DIR)
+    @echo   Binaries     : $(BIN_DIR)
+    @echo   Libraries    : $(LIB_DIR)
+    @echo   Objects      : $(OBJ_DIR)
+    @echo   Map files    : $(BUILD_DIR)
+    @echo   Shared DLL   : $(SHARED_DLL)
+    @echo   Import lib   : $(LIB_OUT)
+!IF "$(BUILD_LIB_STATIC)" == "1"
+    @echo   Static lib   : $(STATIC_LIB)
+!ENDIF
+!IF "$(BUILD_EXAMPLE_TELNET)" == "1"
+    @echo   Telnet server: $(TELNET_BIN)
+!ENDIF
+!IF "$(BUILD_EXAMPLE_TCP)" == "1"
+    @echo   TCP server   : $(TCP_BIN)
+!ENDIF
+!IF "$(BUILD_EXAMPLE_SERIAL)" == "1"
+    @echo   Serial server: $(SERIAL_BIN)
+!ENDIF
+!IF "$(BUILD_EXAMPLE_PIPE)" == "1"
+    @echo   Pipe server  : $(PIPE_BIN)
+!ENDIF
+    @echo.
+    @echo Run targets:
+!IF "$(BUILD_EXAMPLE_TELNET)" == "1"
+    @echo   Recommended: scripts\build-helpers\build.bat run-telnet
+    @echo   NMake (from VS "x64 Native Tools" prompt): nmake /f Makefile.nmake run-telnet
+    @echo.
+!ENDIF
+!IF "$(BUILD_EXAMPLE_TCP)" == "1"
+    @echo   Recommended: scripts\build-helpers\build.bat run-tcp
+    @echo   NMake (from VS "x64 Native Tools" prompt): nmake /f Makefile.nmake run-tcp
+    @echo.
+!ENDIF
+!IF "$(BUILD_EXAMPLE_SERIAL)" == "1"
+    @echo   Recommended: scripts\build-helpers\build.bat run-serial
+    @echo   NMake (from VS "x64 Native Tools" prompt): nmake /f Makefile.nmake run-serial
+    @echo.
+!ENDIF
+!IF "$(BUILD_EXAMPLE_PIPE)" == "1"
+    @echo   Recommended: scripts\build-helpers\build.bat run-pipe
+    @echo   NMake (from VS "x64 Native Tools" prompt): nmake /f Makefile.nmake run-pipe
+    @echo.
+!ENDIF
+
+# ---------------------------------------------------------------------------
+#  Create output directory
+# ---------------------------------------------------------------------------
+_dirs:
+    @if not exist $(BUILD_BASE)   mkdir $(BUILD_BASE)
+    @if not exist $(BUILD_DIR)    mkdir $(BUILD_DIR)
+    @if not exist $(BIN_DIR)      mkdir $(BIN_DIR)
+    @if not exist $(LIB_DIR)      mkdir $(LIB_DIR)
+    @if not exist $(OBJ_DIR)             mkdir $(OBJ_DIR)
+    @if not exist $(OBJ_DIR)\utils       mkdir $(OBJ_DIR)\utils
+    @if not exist $(OBJ_SHARED_DIR)        mkdir $(OBJ_SHARED_DIR)
+
+# ---------------------------------------------------------------------------
+#  Static library
+# ---------------------------------------------------------------------------
+!IF "$(BUILD_LIB_STATIC)" == "1"
+lib: _dirs $(STATIC_LIB)
+
+$(STATIC_LIB): $(LIB_OBJS)
+    $(AR) $(ARFLAGS) /OUT:$@ $**
+!ENDIF
+
+# ---------------------------------------------------------------------------
+#  Shared library
+# ---------------------------------------------------------------------------
+!IF "$(BUILD_LIB_SHARED)" == "1"
+shared: _dirs $(SHARED_DLL)
+
+$(SHARED_DLL): $(SHARED_SRCS) $(INC_DIR)\cli.h $(INC_DIR)\utils\cli_args_parse.h $(INC_DIR)\config\cli_config.h
+    $(CC) $(SHARED_CFLAGS) /LD /Fo$(OBJ_SHARED_DIR)\ \
+        $(SHARED_SRCS) \
+        /link $(LDFLAGS) /OUT:$@ /IMPLIB:$(SHARED_IMPLIB) $(PLAT_LIBS)
+!ENDIF
+
+# ---------------------------------------------------------------------------
+#  Compile library objects  (NMake uses explicit rules, no pattern rules)
+# ---------------------------------------------------------------------------
+$(OBJ_DIR)\cli.obj: $(SRC_DIR)\cli.c \
+                             $(INC_DIR)\cli.h \
+                             $(INC_DIR)\config\cli_config.h
+    $(CC) $(CFLAGS) /c $(SRC_DIR)\cli.c /Fo$@
+
+$(OBJ_DIR)\utils\cli_args_parse.obj: $(SRC_DIR)\utils\cli_args_parse.c \
+                              $(INC_DIR)\utils\cli_args_parse.h \
+                              $(INC_DIR)\config\cli_config.h
+    $(CC) $(CFLAGS) /c $(SRC_DIR)\utils\cli_args_parse.c /Fo$@
+
+
+# ---------------------------------------------------------------------------
+#  Shared demo object  (session setup + command handlers; linked into every example)
+# ---------------------------------------------------------------------------
+$(DEMO_OBJ): $(EXAMPLE_DIR)\shared\cli_demo_setup.c \
+             $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
+             $(INC_DIR)\cli.h \
+             $(INC_DIR)\config\cli_config.h
+    $(CC) $(EXAMPLE_CFLAGS) /c $(EXAMPLE_DIR)\shared\cli_demo_setup.c /Fo$@
+
+# ---------------------------------------------------------------------------
+#  Telnet server example
+# ---------------------------------------------------------------------------
+!IF "$(BUILD_EXAMPLE_TELNET)" == "1"
+telnet: _dirs $(TELNET_BIN)
+
+$(TELNET_BIN): $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.c \
+               $(EXAMPLE_DIR)\win_linux\telnet\cli_transport_telnet.c \
+               $(EXAMPLE_DIR)\win_linux\telnet\cli_transport_telnet.h \
+               $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
+               $(INC_DIR)\cli.h \
+               $(INC_DIR)\config\cli_config.h \
+               $(DEMO_OBJ) $(LIB_OUT)
+    $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.c \
+        $(EXAMPLE_DIR)\win_linux\telnet\cli_transport_telnet.c \
+        /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_telnet.map \
+        $(DEMO_OBJ) $(LIB_OUT) $(PLAT_LIBS)
+!ELSE
+telnet:
+    @echo telnet requires BUILD_EXAMPLE_TELNET=1.
+    @cmd /c exit 1
+!ENDIF
+
+# ---------------------------------------------------------------------------
+#  Serial server example  (stdin/stdout simulation on Windows)
+# ---------------------------------------------------------------------------
+!IF "$(BUILD_EXAMPLE_SERIAL)" == "1"
+uart: _dirs $(SERIAL_BIN)
+
+$(SERIAL_BIN): $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.c \
+               $(EXAMPLE_DIR)\win_linux\serial\cli_transport_serial.c \
+               $(EXAMPLE_DIR)\win_linux\serial\cli_transport_serial.h \
+               $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.h \
+               $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
+               $(INC_DIR)\cli.h \
+               $(INC_DIR)\config\cli_config.h \
+               $(DEMO_OBJ) $(LIB_OUT)
+    $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.c \
+        $(EXAMPLE_DIR)\win_linux\serial\cli_transport_serial.c \
+        /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_serial.map \
+        $(DEMO_OBJ) $(LIB_OUT) $(PLAT_LIBS)
+!ELSE
+uart:
+    @echo uart requires BUILD_EXAMPLE_SERIAL=1.
+    @cmd /c exit 1
+!ENDIF
+
+# ---------------------------------------------------------------------------
+#  TCP server example
+# ---------------------------------------------------------------------------
+!IF "$(BUILD_EXAMPLE_TCP)" == "1"
+tcp: _dirs $(TCP_BIN)
+
+$(TCP_BIN): $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.c \
+            $(EXAMPLE_DIR)\win_linux\tcp\cli_transport_tcp.c \
+            $(EXAMPLE_DIR)\win_linux\tcp\cli_transport_tcp.h \
+            $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.h \
+            $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
+            $(INC_DIR)\cli.h \
+            $(INC_DIR)\config\cli_config.h \
+            $(DEMO_OBJ) $(LIB_OUT)
+    $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.c \
+        $(EXAMPLE_DIR)\win_linux\tcp\cli_transport_tcp.c \
+        /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_tcp.map \
+        $(DEMO_OBJ) $(LIB_OUT) $(PLAT_LIBS)
+!ELSE
+tcp:
+    @echo tcp requires BUILD_EXAMPLE_TCP=1.
+    @cmd /c exit 1
+!ENDIF
+
+# ---------------------------------------------------------------------------
+#  Pipe server example  (named + anonymous pipe IPC)
+# ---------------------------------------------------------------------------
+!IF "$(BUILD_EXAMPLE_PIPE)" == "1"
+pipe: _dirs $(PIPE_BIN)
+
+$(PIPE_BIN): $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
+             $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.c \
+             $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.h \
+             $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
+             $(INC_DIR)\cli.h \
+             $(INC_DIR)\config\cli_config.h \
+             $(DEMO_OBJ) $(LIB_OUT)
+    $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
+        $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.c \
+        /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_pipe.map \
+        $(DEMO_OBJ) $(LIB_OUT) $(PLAT_LIBS)
+!ELSE
+pipe:
+    @echo pipe requires BUILD_EXAMPLE_PIPE=1.
+    @cmd /c exit 1
+!ENDIF
+
+# ---------------------------------------------------------------------------
+#  Run targets
+# ---------------------------------------------------------------------------
+!IF "$(BUILD_EXAMPLE_TELNET)" == "1"
+run-telnet: $(TELNET_BIN)
+    @$(TELNET_BIN) 2323
+!ELSE
+run-telnet:
+    @echo run-telnet requires BUILD_EXAMPLE_TELNET=1.
+    @cmd /c exit 1
+!ENDIF
+
+!IF "$(BUILD_EXAMPLE_SERIAL)" == "1"
+run-serial: $(SERIAL_BIN)
+    @$(SERIAL_BIN)
+!ELSE
+run-serial:
+    @echo run-serial requires BUILD_EXAMPLE_SERIAL=1.
+    @cmd /c exit 1
+!ENDIF
+
+!IF "$(BUILD_EXAMPLE_TCP)" == "1"
+run-tcp: $(TCP_BIN)
+    @$(TCP_BIN) 2323
+!ELSE
+run-tcp:
+    @echo run-tcp requires BUILD_EXAMPLE_TCP=1.
+    @cmd /c exit 1
+!ENDIF
+!IF "$(BUILD_EXAMPLE_PIPE)" == "1"
+run-pipe: $(PIPE_BIN)
+    @$(PIPE_BIN) anon
+!ELSE
+run-pipe:
+    @echo run-pipe requires BUILD_EXAMPLE_PIPE=1.
+    @cmd /c exit 1
+!ENDIF
+
+# ---------------------------------------------------------------------------
+#  Clean — build\msvc\windows\ only
+# ---------------------------------------------------------------------------
+clean:
+    @if exist $(BIN_DIR) rmdir /s /q $(BIN_DIR)
+    @if exist $(LIB_DIR) rmdir /s /q $(LIB_DIR)
+    @if exist $(OBJ_DIR) rmdir /s /q $(OBJ_DIR)
+    @if exist $(BUILD_DIR)\*.obj del /q $(BUILD_DIR)\*.obj
+    @if exist $(BUILD_DIR)\*.lib del /q $(BUILD_DIR)\*.lib
+    @if exist $(BUILD_DIR)\*.exe del /q $(BUILD_DIR)\*.exe
+    @if exist $(BUILD_DIR)\*.pdb del /q $(BUILD_DIR)\*.pdb
+    @if exist $(BUILD_DIR)\*.ilk del /q $(BUILD_DIR)\*.ilk
+    @if exist $(BUILD_DIR)\*.map del /q $(BUILD_DIR)\*.map
+    @echo Cleaned contents of $(BUILD_DIR) (folder kept).
+
+# ---------------------------------------------------------------------------
+#  Clean — entire build\ tree
+# ---------------------------------------------------------------------------
+clean-all:
+    @if exist $(BUILD_BASE) rmdir /s /q $(BUILD_BASE)
+    @echo Removed $(BUILD_BASE)\.
+
+distclean: clean-all
+
+# ---------------------------------------------------------------------------
+#  Help
+# ---------------------------------------------------------------------------
+help:
+    @echo.
+    @echo  OpenLibCLI Library - NMake build (MSVC)
+    @echo  ==========================================
+    @echo.
+    @echo  Output directories:
+    @echo    build\msvc\windows\binaries
+    @echo    build\msvc\windows\libs
+    @echo    build\msvc\windows\obj
+    @echo.
+    @echo  Targets:
+    @echo    (default)                  Build shared library + examples  (add BUILD_LIB_STATIC=1 for static)
+    @echo    lib                        Static library only  (requires BUILD_LIB_STATIC=1)
+    @echo    shared                     Shared library only
+    @echo    telnet                     Telnet server example
+    @echo    tcp                        TCP server example
+    @echo    uart                       Serial server example
+    @echo    pipe                       Named/anonymous pipe server example
+    @echo    (unix socket example is POSIX-only; use GNU make on Linux/macOS)
+    @echo    run-telnet                 Build and run telnet server (port 2323)
+    @echo    run-tcp                    Build and run TCP server (port 2323)
+    @echo    run-serial                 Build and run serial demo
+    @echo    run-pipe                   Build and run pipe demo (anonymous/scripted)
+    @echo    clean                      Remove build\msvc\windows\ artefacts
+    @echo    clean-all                  Remove entire build\ tree
+    @echo    help                       Show this message
+    @echo.
+    @echo  Variables:
+    @echo    BUILD_EXAMPLE_TELNET=0^|1      Enable Telnet transport and telnet demo
+    @echo    BUILD_EXAMPLE_TCP=0^|1         Enable TCP transport
+    @echo    BUILD_EXAMPLE_SERIAL=0^|1      Enable generic serial transport and serial demo
+    @echo    BUILD_EXAMPLE_PIPE=0^|1        Enable pipe transport and pipe demo
+    @echo    BUILD_EXAMPLE_UNIX_SOCKET=0^|1 Enable UNIX socket transport (POSIX-only demo)
+    @echo    BUILD_LIB_STATIC=0^|1          Build static library  (default: 0)
+    @echo    BUILD_LIB_SHARED=0^|1          Build shared library  (default: 1)
+    @echo.
+    @echo  Usage (recommended):
+    @echo    Use the build wrapper which auto-initialises Visual Studio:
+    @echo      scripts\build-helpers\build.bat
+    @echo
+    @echo    Or run NMake directly from a Visual Studio "x64 Native Tools" prompt:
+    @echo      nmake /f Makefile.nmake
+    @echo      nmake /f Makefile.nmake run-telnet
+    @echo      nmake /f Makefile.nmake clean-all
+    @echo.

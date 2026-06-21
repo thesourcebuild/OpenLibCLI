@@ -1,0 +1,12 @@
+option('BUILD_EXAMPLES', type : 'boolean', value : true,
+       description : 'Master switch for all example programs')
+option('BUILD_EXAMPLE_SERIAL', type : 'boolean', value : false,
+        description : 'Build serial/stdio example (cli_server_serial)')
+option('BUILD_EXAMPLE_TELNET', type : 'boolean', value : false,
+        description : 'Build Telnet server example (cli_server_telnet)')
+option('BUILD_EXAMPLE_TCP', type : 'boolean', value : false,
+       description : 'Build TCP server example (cli_server_tcp)')
+option('BUILD_EXAMPLE_PIPE', type : 'boolean', value : false,
+       description : 'Build pipe transport example (cli_server_pipe)')
+option('BUILD_EXAMPLE_UNIX_SOCKET', type : 'boolean', value : false,
+       description : 'Build UNIX socket example (cli_server_unix_socket, Linux only)')

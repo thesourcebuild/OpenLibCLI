@@ -1,0 +1,27 @@
+---
+Checks: >
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  cert-*,
+  misc-*,
+  -bugprone-easily-swappable-parameters,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -readability-isolate-declaration,
+  -misc-include-cleaner,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -cert-err33-c,
+  -cert-err34-c,
+  -bugprone-suspicious-include,
+  -misc-no-recursion,
+  -misc-redundant-expression
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '^include/.*'
+FormatStyle: file
+...

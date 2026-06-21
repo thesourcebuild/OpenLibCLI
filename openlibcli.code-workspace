@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"*.h": "c",
+			"*.c": "c"
+		},
+		"cmake.configureOnOpen": true,
+		"cmake.buildDirectory": "${workspaceFolder}/build",
+		"C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+		"cmake.exportCompileCommandsFile": true
+	},
+}

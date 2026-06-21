@@ -1,0 +1,7 @@
+[wrap-git]
+url      = https://github.com/OpenLibCLI/libcli-perfecto.git
+revision = v@CLI_VERSION@
+depth    = 1
+
+[provide]
+OpenLibCLI = openlibcli_dep

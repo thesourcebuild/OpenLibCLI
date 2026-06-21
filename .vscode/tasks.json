@@ -1,0 +1,129 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build: Windows (build.bat)",
+			"type": "shell",
+			"command": "${workspaceFolder}/scripts/build-helpers/build.bat",
+			"group": "build",
+			"options": { "shell": { "executable": "cmd.exe", "args": ["/c"] } },
+			"problemMatcher": []
+		},
+		{
+			"label": "Build: Unix (build.sh)",
+			"type": "shell",
+			"command": "${workspaceFolder}/scripts/build-helpers/build.sh",
+			"group": "build",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release: Package All (Windows)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-File",
+				"${workspaceFolder}/scripts/package-helpers/package_all.ps1"
+			],
+			"group": "build",
+			"options": { "shell": { "executable": "powershell.exe", "args": ["-NoProfile"] } },
+			"problemMatcher": []
+		},
+		{
+			"label": "Release: Package All (Unix)",
+			"type": "shell",
+			"command": "${workspaceFolder}/scripts/package-helpers/package_all.sh",
+			"group": "build",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release: Package - Source (Windows)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-File",
+				"${workspaceFolder}/scripts/package-helpers/package_src.ps1"
+			],
+			"group": "build",
+			"options": { "shell": { "executable": "powershell.exe", "args": ["-NoProfile"] } },
+			"problemMatcher": []
+		},
+		{
+			"label": "Release: Package - CMake (Windows)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-File",
+				"${workspaceFolder}/scripts/package-helpers/package_cmake.ps1"
+			],
+			"group": "build",
+			"options": { "shell": { "executable": "powershell.exe", "args": ["-NoProfile"] } },
+			"problemMatcher": []
+		},
+		{
+			"label": "Release: Package - Meson (Windows)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-File",
+				"${workspaceFolder}/scripts/package-helpers/package_meson.ps1"
+			],
+			"group": "build",
+			"options": { "shell": { "executable": "powershell.exe", "args": ["-NoProfile"] } },
+			"problemMatcher": []
+		},
+		{
+			"label": "Release: Package - Meson Wrap (Windows)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-File",
+				"${workspaceFolder}/scripts/package-helpers/package_meson_wrap.ps1"
+			],
+			"group": "build",
+			"options": { "shell": { "executable": "powershell.exe", "args": ["-NoProfile"] } },
+			"problemMatcher": []
+		},
+		{
+			"label": "Release: Package - Source (Unix)",
+			"type": "shell",
+			"command": "${workspaceFolder}/scripts/package-helpers/package_src.sh",
+			"group": "build",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release: Package - CMake (Unix)",
+			"type": "shell",
+			"command": "${workspaceFolder}/scripts/package-helpers/package_cmake.sh",
+			"group": "build",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release: Package - Meson (Unix)",
+			"type": "shell",
+			"command": "${workspaceFolder}/scripts/package-helpers/package_meson.sh",
+			"group": "build",
+			"problemMatcher": []
+		},
+		{
+			"label": "Release: Package - Meson Wrap (Unix)",
+			"type": "shell",
+			"command": "${workspaceFolder}/scripts/package-helpers/package_meson_wrap.sh",
+			"group": "build",
+			"problemMatcher": []
+		},
+		{
+			"label": "Test: Run CTest",
+			"type": "shell",
+			"command": "ctest",
+			"args": [
+				"--test-dir",
+				"build",
+				"--output-on-failure",
+				"-C",
+				"Release"
+			],
+			"group": "test",
+			"problemMatcher": []
+		}
+	]
+}

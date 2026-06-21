@@ -1,0 +1,42 @@
+# Build directories
+build/
+bin/
+obj/
+
+# Compiled object files
+*.o
+*.obj
+
+# Libraries
+*.lib
+*.a
+*.dll
+*.so
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Windows/Visual Studio overrides and debug files
+*.pdb
+*.ilk
+*.map
+*.exp
+.vs/
+*.user
+*.suo
+
+# Temporary / Log files
+*.log
+*.tmp
+lint_output.txt
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+tests/
+graphify-out
+.opencode
