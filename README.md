@@ -665,11 +665,11 @@ No special setup needed. GCC and Clang both work out of the box.
 
 ---
 
-## Contributing
+## Contributions
 
 Contributions of all sizes are warmly welcome!. Please feel free to:
 
-- Report issues on [GitHub Issues](https://github.com/thesourcebuild/OpenLibCLI/issues)
+- Report issues using [the issue guide](Docs/Create_a_issue.md)
 - Submit pull requests
 - Improve documentation
 - Suggest new features
