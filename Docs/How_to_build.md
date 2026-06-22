@@ -1,5 +1,12 @@
 # How to Build
 
+## Table of Contents
+
+- [Compile-time tuning](#compile-time-tuning-cli_configh)
+- [Build variables](#build-variables)
+- [Build from Packages](#build-from-packages)
+- [Build using Build-Helpers scripts](#build-using-build-helpers-scripts)
+
 ## Compile-time tuning (`cli_config.h`)
 
 All `CLI_*` constants in [`cli/config/cli_config.h`](cli/config/cli_config.h) use `#ifndef` guards, so any build system can override them via `-D` flags. The defaults target full-OS desktop usage.

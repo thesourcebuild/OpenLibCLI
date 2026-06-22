@@ -2,6 +2,13 @@
 
 Use GitHub Issues to report bugs, request features, or point out documentation problems.
 
+## Table of Contents
+
+- [Before You Open an Issue](#before-you-open-an-issue)
+- [What to Include](#what-to-include)
+- [Good Issue Reports](#good-issue-reports)
+- [Where to Submit](#where-to-submit)
+
 ## Before You Open an Issue
 
 - Search existing issues first.

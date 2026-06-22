@@ -2,6 +2,28 @@
 
 A command-line interface library written in **pure C99** with **100 % static memory allocation**. Runs on Windows, Linux/macOS, and MCUs (AVR, ARM, RISC-V) with any byte-stream transport (Telnet, TCP, serial, pipes, UNIX sockets, or custom).
 
+## Table of Contents
+
+- [Features](#features)
+- [Use Cases](#use-cases)
+- [Coding Standards](#coding-standards)
+- [Demo](#demo)
+- [Repository Layout](#repository-layout)
+- [Quick Start](#quick-start)
+- [Building](#building)
+- [Transport Layer](#transport-layer)
+- [Command Registration](#command-registration)
+- [Privilege Levels and Modes](#privilege-levels-and-modes)
+- [Output and Pipe Filters](#output-and-pipe-filters)
+- [Authentication](#authentication)
+- [Non-Blocking / Embedded Usage](#non-blocking--embedded-usage)
+- [Programmatic Command Execution](#programmatic-command-execution)
+- [Built-in Commands](#built-in-commands)
+- [API Reference](#api-reference)
+- [Platform Notes](#platform-notes)
+- [Contributions](#contributions)
+- [License](#license)
+
 ---
 
 ## Features
