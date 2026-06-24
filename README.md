@@ -4,25 +4,50 @@ A command-line interface library written in **pure C99** with **100 % static mem
 
 ## Table of Contents
 
-- [Features](#features)
-- [Use Cases](#use-cases)
-- [Coding Standards](#coding-standards)
-- [Demo](#demo)
-- [Repository Layout](#repository-layout)
-- [Quick Start](#quick-start)
-- [Building](#building)
-- [Transport Layer](#transport-layer)
-- [Command Registration](#command-registration)
-- [Privilege Levels and Modes](#privilege-levels-and-modes)
-- [Output and Pipe Filters](#output-and-pipe-filters)
-- [Authentication](#authentication)
-- [Non-Blocking / Embedded Usage](#non-blocking--embedded-usage)
-- [Programmatic Command Execution](#programmatic-command-execution)
-- [Built-in Commands](#built-in-commands)
-- [API Reference](#api-reference)
-- [Platform Notes](#platform-notes)
-- [Contributions](#contributions)
-- [License](#license)
+- [OpenLibCLI Library](#openlibcli-library)
+  - [Table of Contents](#table-of-contents)
+  - [Features](#features)
+  - [Use Cases](#use-cases)
+  - [Coding Standards](#coding-standards)
+  - [Demo](#demo)
+  - [Repository Layout](#repository-layout)
+  - [Quick Start](#quick-start)
+    - [1 — Serial CLI (stdin/stdout)](#1--serial-cli-stdinstdout)
+    - [2 — Telnet CLI server](#2--telnet-cli-server)
+    - [3 — Embedded (STM32 / ESP32 / RPI PICO / AVR / ARDUINO)](#3--embedded-stm32--esp32--rpi-pico--avr--arduino)
+  - [Building](#building)
+    - [Windows — automatic (recommended)](#windows--automatic-recommended)
+    - [Linux / macOS — automatic](#linux--macos--automatic)
+    - [GNU Make (GCC / MinGW / Clang)](#gnu-make-gcc--mingw--clang)
+    - [MSVC / NMake](#msvc--nmake)
+    - [CMake](#cmake)
+  - [Transport Layer](#transport-layer)
+    - [Built-in transports](#built-in-transports)
+    - [Custom transport](#custom-transport)
+  - [Command Registration](#command-registration)
+    - [Command handler signature](#command-handler-signature)
+  - [Privilege Levels and Modes](#privilege-levels-and-modes)
+    - [Privilege levels](#privilege-levels)
+    - [Built-in modes](#built-in-modes)
+    - [Custom modes](#custom-modes)
+  - [Output and Pipe Filters](#output-and-pipe-filters)
+  - [Authentication](#authentication)
+  - [Non-Blocking / Embedded Usage](#non-blocking--embedded-usage)
+  - [Programmatic Command Execution](#programmatic-command-execution)
+    - [`cli_exec` — Execute a command string](#cli_exec--execute-a-command-string)
+    - [`cli_exec_argv` — Execute pre-parsed arguments](#cli_exec_argv--execute-pre-parsed-arguments)
+    - [No-op transport (silent execution)](#no-op-transport-silent-execution)
+    - [Capturing output](#capturing-output)
+  - [Built-in Commands](#built-in-commands)
+  - [API Reference](#api-reference)
+  - [Platform Notes](#platform-notes)
+    - [Linux / macOS](#linux--macos)
+    - [Windows (MinGW)](#windows-mingw)
+    - [Windows (MSVC)](#windows-msvc)
+    - [Bare-metal / RTOS embedded](#bare-metal--rtos-embedded)
+  - [Contributions](#contributions)
+  - [License](#license)
+  - [Author](#author)
 
 ---
 
@@ -228,7 +253,7 @@ See the [`examples-embedded/`](examples-embedded) directory for microcontrollers
 
 ## Building
 
-See [`Docs/How_to_build.md`](Docs/How_to_build.md) for the full build guide covering all toolchains, compile-time tuning, and output layouts.
+See [`Docs/how_to_build.md`](Docs/how_to_build.md) for the full build guide covering all toolchains, compile-time tuning, and output layouts.
 
 ### Windows — automatic (recommended)
 
@@ -691,7 +716,7 @@ No special setup needed. GCC and Clang both work out of the box.
 
 Contributions of all sizes are warmly welcome!. Please feel free to:
 
-- Report issues using [the issue guide](Docs/Create_a_issue.md)
+- Report issues using [the issue guide](Docs/create_a_issue.md)
 - Submit pull requests
 - Improve documentation
 - Suggest new features
