@@ -9,13 +9,13 @@
 
 ## Compile-time tuning (`cli_config.h`)
 
-All `CLI_*` constants in [`cli/config/cli_config.h`](cli/config/cli_config.h) use `#ifndef` guards, so any build system can override them via `-D` flags. The defaults target full-OS desktop usage.
+All `CLI_*` constants in [`cli/config/cli_config.h`](../cli/config/cli_config.h) use `#ifndef` guards, so any build system can override them via `-D` flags. The defaults target full-OS desktop usage.
 
-See [`cli/config/cli_config.h`](cli/config/cli_config.h) for full list of tunables with defaults.
+See [`cli/config/cli_config.h`](../cli/config/cli_config.h) for full list of tunables with defaults.
 
 For embedded targets, copy `cli/config/cli_embedded_config.h` to `cli_config.h` on your include path. Alternatively, define `CLI_BUILD_CONFIG_HEADER_ENABLED=1` and set `CLI_CONFIG_HEADER_PATH` for a fully custom config path.
 
-See [`cli/config/cli_config.h`](cli/config/cli_config.h) for the complete list of ~30 options.
+See [`cli/config/cli_config.h`](../cli/config/cli_config.h) for the complete list of ~30 options.
 
 ## Build variables
 
