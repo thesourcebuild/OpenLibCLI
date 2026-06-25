@@ -131,6 +131,14 @@ extern "C" {
 #define OPENLIBCLI_API
 #endif
 
+/* Boolean value constants with explicit cast for MISRA compliance. */
+#ifndef CLI_TRUE
+#define CLI_TRUE ((bool)1)
+#endif
+#ifndef CLI_FALSE
+#define CLI_FALSE ((bool)0)
+#endif
+
 #ifndef CLI_NPOS
 #define CLI_NPOS ((size_t)-1) /**< @c size_t sentinel meaning "not found" / invalid. */
 #endif
