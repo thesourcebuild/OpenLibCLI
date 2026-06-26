@@ -98,6 +98,14 @@ else
     EXE_EXT    :=
 endif
 
+# AddressSanitizer — separate output directory + sanitizer flags
+BUILD_ASAN ?= 0
+ifeq ($(BUILD_ASAN),1)
+BUILD_DIR := $(BUILD_DIR)-asan
+CFLAGS    += -fsanitize=address -fno-omit-frame-pointer -g
+LDFLAGS   += -fsanitize=address
+endif
+
 EMBED_DIR := $(BUILD_BASE)/embedded-baremetal
 BIN_DIR   := $(BUILD_DIR)/binaries
 LIB_DIR   := $(BUILD_DIR)/libs
@@ -244,6 +252,9 @@ all: $(ALL_HOST_TARGETS)
 	@echo "  Binaries      : $(BIN_DIR)/"
 	@echo "  Libraries     : $(LIB_DIR)/"
 	@echo "  Objects       : $(OBJ_DIR)/"
+ifneq ($(BUILD_ASAN),0)
+	@echo "  Sanitizer     : AddressSanitizer"
+endif
 	@echo "  Map files     : $(BUILD_DIR)/"
 	@echo "  Shared lib    : $(LIB_OUT)"
 ifneq ($(strip $(SHARED_IMPLIB_OUT)),)
@@ -434,6 +445,13 @@ $(EMBED_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(EMBED_OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # ---------------------------------------------------------------------------
+#  AddressSanitizer target  —  rebuild everything with -fsanitize=address
+# ---------------------------------------------------------------------------
+.PHONY: asan
+asan:
+	$(MAKE) BUILD_ASAN=1 all
+
+# ---------------------------------------------------------------------------
 #  Run targets
 # ---------------------------------------------------------------------------
 .PHONY: run-telnet
@@ -535,6 +553,10 @@ clean-all distclean:
 	$(RMDIR) $(BUILD_BASE)
 	@echo "Removed $(BUILD_BASE)/."
 
+.PHONY: clean-asan
+clean-asan:
+	$(MAKE) clean BUILD_ASAN=1
+
 # ---------------------------------------------------------------------------
 #  Help
 # ---------------------------------------------------------------------------
@@ -560,6 +582,7 @@ help:
 	@echo "  cli_server_pipe    Named/anonymous pipe server example"
 	@echo "  cli_server_unix_socket  UNIX domain socket server (POSIX only)"
 	@echo "  embedded-baremetal  Cross-compile for bare-metal → build/gcc/embedded-baremetal/"
+	@echo "  asan           Build everything with AddressSanitizer (host only)"
 	@echo ""
 	@echo "Run targets:"
 	@echo "  run-telnet     Build + run telnet server"
@@ -569,6 +592,7 @@ help:
 	@echo "  run-unix-socket  Build + run UNIX socket server (POSIX only)"
 	@echo "  clean          Remove artefacts for current platform"
 	@echo "  clean-all      Remove entire build/ tree"
+	@echo "  clean-asan     Remove ASAN build artefacts"
 	@echo "  help           Show this message"
 	@echo ""
 	@echo "Variables:"
@@ -580,6 +604,7 @@ help:
 	@echo "  BUILD_EXAMPLE_UNIX_SOCKET=0|1  Enable UNIX socket transport and POSIX demo"
 	@echo "  BUILD_LIB_STATIC=0|1          Build static library  (default: 0)"
 	@echo "  BUILD_LIB_SHARED=0|1          Build shared library  (default: 1)"
+	@echo "  BUILD_ASAN=0|1               Build with AddressSanitizer  (default: 0)"
 	@echo "  CC=gcc              Host compiler"
 	@echo "  CC                  Compiler (set to cross-compiler for embedded)"
 	@echo "  PORT=2323           Telnet port (run-telnet)"
@@ -589,6 +614,7 @@ help:
 	@echo "  make BUILD_EXAMPLE_PIPE=0"
 	@echo "  make run-telnet PORT=9999"
 	@echo "  make CC=clang"
+	@echo "  make asan"
 	@echo "  make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal"
 	@echo "  make CC=x86_64-w64-mingw32-gcc PLATFORM=windows"
 	@echo ""

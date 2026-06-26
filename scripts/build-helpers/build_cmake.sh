@@ -71,7 +71,7 @@ while [ $# -gt 0 ]; do
             echo ""
             exit 0
             ;;
-        BUILD_EXAMPLE_*=*)
+        BUILD_ASAN=*|BUILD_EXAMPLE_*=*)
             name="${1%%=*}"
             value="${1#*=}"
             if [ "$value" = "1" ]; then
@@ -120,7 +120,7 @@ fi
 # ---------------------------------------------------------------------------
 #  Propagate BUILD_EXAMPLE_* from environment (unless already passed as -D)
 # ---------------------------------------------------------------------------
-for _var in BUILD_EXAMPLE_TELNET BUILD_EXAMPLE_TCP BUILD_EXAMPLE_SERIAL BUILD_EXAMPLE_PIPE BUILD_EXAMPLE_UNIX_SOCKET BUILD_TESTING; do
+for _var in BUILD_EXAMPLE_TELNET BUILD_EXAMPLE_TCP BUILD_EXAMPLE_SERIAL BUILD_EXAMPLE_PIPE BUILD_EXAMPLE_UNIX_SOCKET BUILD_TESTING BUILD_ASAN; do
     if [ -n "${!_var+x}" ]; then
         _already=0
         for _opt in "${CMAKE_OPTS[@]}"; do

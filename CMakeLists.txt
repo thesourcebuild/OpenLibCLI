@@ -81,6 +81,7 @@ option(BUILD_EXAMPLE_SERIAL "Build the generic serial transport" OFF)
 option(BUILD_EXAMPLE_PIPE "Build the pipe transport" OFF)
 option(BUILD_EXAMPLE_UNIX_SOCKET "Build the UNIX socket transport" OFF)
 option(BUILD_TESTING "Build the test suite" OFF)
+option(BUILD_ASAN "Build with AddressSanitizer" OFF)
 
 # =========================================================================
 #  Library type selection
@@ -99,6 +100,15 @@ else()
         -Wstrict-prototypes -Wmissing-prototypes
         -Wno-unused-parameter
     )
+endif()
+
+# =========================================================================
+#  AddressSanitizer  (GCC / Clang only; not MSVC)
+# =========================================================================
+if(BUILD_ASAN AND NOT MSVC)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fno-omit-frame-pointer -g")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address")
 endif()
 
 # =========================================================================
