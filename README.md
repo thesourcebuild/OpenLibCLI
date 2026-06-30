@@ -90,12 +90,12 @@ The library targets **MISRA 2012** with **MISRA 2023 amendments** and is verifie
 |------|----------|
 | **No dynamic memory** | 100 % static allocation — no `malloc`/`free`/`realloc`. All buffers are compile-time fixed arrays. |
 | **Single return / single break** | Functions prefer single exit points; loops use at most one `break`. |
-| **No side effects in `&&`/`||` right operands** | Function calls and modified variables are moved to the left operand. |
+| **No side effects in the right operand of `&&` or `\|\|`** | Move function calls and variable modifications to the left operand. |
 | **Formatted I/O wrappers** | `cli_snprintf` / `cli_vsnprintf` / `cli_sscanf` abstract away direct `*printf`/`*scanf` usage. |
 | **Strict compiler flags** | Builds clean with `-std=c99 -Wall -Wextra -Werror`. |
 | **Static analysis** | PVS-Studio scans run regularly; all warnings reviewed and either fixed or suppressed. |
 
-The following PVS-Studio diagnostics are suppressed with `//-V::` annotations in the source code:
+The following PVS-Studio diagnostics are suppressed with `//-V::` annottions in the source code:
 
 | Rule | Count | Reason |
 |------|-------|--------|
