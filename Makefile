@@ -48,11 +48,13 @@
 CC    ?= gcc
 AR    ?= ar
 ifeq ($(OS),Windows_NT)
-    RM    ?= cmd /c del /f /q
+    RM     = cmd /c del /f /q
     RMDIR ?= cmd /c rd /s /q
+    COPY   = copy /y
 else
     RM    ?= rm -f
     RMDIR ?= rm -rf
+    COPY   = cp -f
 endif
 
 # ---------------------------------------------------------------------------
@@ -315,8 +317,13 @@ ifeq ($(BUILD_LIB_SHARED),1)
 .PHONY: shared
 shared: $(SHARED_LIB_OUT)
 
-$(SHARED_LIB_OUT): $(LIB_SRCS) | $(LIB_DIR)
+$(SHARED_LIB_OUT): $(LIB_SRCS) | $(BIN_DIR) $(LIB_DIR)
 	$(CC) $(SHARED_CFLAGS) $(SHARED_LINK_FLAGS) -o $@ $(LIB_SRCS) $(PLAT_LIBS)
+ifeq ($(OS),Windows_NT)
+	$(COPY) $(subst /,\,$@) $(subst /,\,$(BIN_DIR))
+else
+	$(COPY) $@ $(BIN_DIR)/
+endif
 endif
 
 # ---------------------------------------------------------------------------
@@ -457,7 +464,11 @@ asan:
 .PHONY: run-telnet
 ifeq ($(BUILD_EXAMPLE_TELNET),1)
 run-telnet: $(TELNET_BIN)
+ifeq ($(OS),Windows_NT)
+	@$(subst /,\,$(TELNET_BIN)) $(PORT)
+else
 	@$(TELNET_BIN) $(PORT)
+endif
 else
 run-telnet:
 	@echo "run-telnet requires BUILD_EXAMPLE_TELNET=1."
@@ -467,7 +478,11 @@ endif
 .PHONY: run-tcp
 ifeq ($(BUILD_EXAMPLE_TCP),1)
 run-tcp: $(TCP_BIN)
+ifeq ($(OS),Windows_NT)
+	@$(subst /,\,$(TCP_BIN)) $(PORT)
+else
 	@$(TCP_BIN) $(PORT)
+endif
 else
 run-tcp:
 	@echo "run-tcp requires BUILD_EXAMPLE_TCP=1."
@@ -477,7 +492,11 @@ endif
 .PHONY: run-serial
 ifeq ($(BUILD_EXAMPLE_SERIAL),1)
 run-serial: $(SERIAL_BIN)
+ifeq ($(OS),Windows_NT)
+	@$(subst /,\,$(SERIAL_BIN))
+else
 	@$(SERIAL_BIN)
+endif
 else
 run-serial:
 	@echo "run-serial requires BUILD_EXAMPLE_SERIAL=1."
@@ -487,7 +506,11 @@ endif
 .PHONY: run-pipe
 ifeq ($(BUILD_EXAMPLE_PIPE),1)
 run-pipe: $(PIPE_BIN)
+ifeq ($(OS),Windows_NT)
+	@$(subst /,\,$(PIPE_BIN)) anon
+else
 	@$(PIPE_BIN) anon
+endif
 else
 run-pipe:
 	@echo "run-pipe requires BUILD_EXAMPLE_PIPE=1."
@@ -498,7 +521,11 @@ ifeq ($(BUILD_EXAMPLE_UNIX_SOCKET),1)
 ifneq ($(PLATFORM),windows)
 .PHONY: run-unix-socket
 run-unix-socket: $(UNIX_SOCK_BIN)
+ifeq ($(OS),Windows_NT)
+	@$(subst /,\,$(UNIX_SOCK_BIN))
+else
 	@$(UNIX_SOCK_BIN)
+endif
 else
 .PHONY: run-unix-socket
 run-unix-socket:
@@ -536,13 +563,23 @@ endif
 # ---------------------------------------------------------------------------
 .PHONY: clean
 clean:
+ifeq ($(OS),Windows_NT)
+	-$(RMDIR) $(subst /,\,$(BIN_DIR))
+	-$(RMDIR) $(subst /,\,$(LIB_DIR))
+	-$(RMDIR) $(subst /,\,$(OBJ_DIR))
+	-$(RM) $(subst /,\,$(BUILD_DIR)/*.map $(BUILD_DIR)/*.obj $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d \
+	      $(BUILD_DIR)/*.a $(BUILD_DIR)/*.lib $(BUILD_DIR)/*.so $(BUILD_DIR)/*.dll $(BUILD_DIR)/*.dylib \
+	      $(BUILD_DIR)/*.exe $(BUILD_DIR)/*.out $(BUILD_DIR)/*.app \
+	      $(BUILD_DIR)/*.pdb $(BUILD_DIR)/*.ilk)
+else
 	-$(RMDIR) $(BIN_DIR)
 	-$(RMDIR) $(LIB_DIR)
 	-$(RMDIR) $(OBJ_DIR)
-	$(RM) $(BUILD_DIR)/*.map $(BUILD_DIR)/*.obj $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d \
+	-$(RM) $(BUILD_DIR)/*.map $(BUILD_DIR)/*.obj $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d \
 	      $(BUILD_DIR)/*.a $(BUILD_DIR)/*.lib $(BUILD_DIR)/*.so $(BUILD_DIR)/*.dll $(BUILD_DIR)/*.dylib \
 	      $(BUILD_DIR)/*.exe $(BUILD_DIR)/*.out $(BUILD_DIR)/*.app \
-	      $(BUILD_DIR)/*.pdb $(BUILD_DIR)/*.ilk
+	      $(BUILD_DIR)/*.pdb $(BUILD_DIR)/*.ilk)
+endif
 	@echo "Cleaned contents of $(BUILD_DIR)/ (folder kept)."
 
 # ---------------------------------------------------------------------------
@@ -550,7 +587,11 @@ clean:
 # ---------------------------------------------------------------------------
 .PHONY: clean-all distclean
 clean-all distclean:
-	$(RMDIR) $(BUILD_BASE)
+ifeq ($(OS),Windows_NT)
+	-$(RMDIR) $(subst /,\,$(BUILD_BASE))
+else
+	-$(RMDIR) $(BUILD_BASE)
+endif
 	@echo "Removed $(BUILD_BASE)/."
 
 .PHONY: clean-asan

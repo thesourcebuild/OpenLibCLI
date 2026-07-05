@@ -312,6 +312,7 @@ make distclean
 
 # Windows (MinGW — must pass CC=gcc explicitly)
 mingw32-make CC=gcc PLATFORM=windows
+mingw32-make CC=gcc PLATFORM=windows run-serial
 mingw32-make CC=gcc PLATFORM=windows run-telnet
 mingw32-make CC=gcc PLATFORM=windows run-tcp
 mingw32-make CC=gcc PLATFORM=windows clean
