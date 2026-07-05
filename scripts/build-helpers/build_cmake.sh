@@ -30,10 +30,12 @@ die()  { echo -e "${RED}[build_cmake] ERROR:${RST} $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 #  Detect host platform
 # ---------------------------------------------------------------------------
-PLATFORM="linux"
-case "$(uname -s 2>/dev/null)" in
-    Darwin) PLATFORM="macos" ;;
-esac
+if [ -z "${PLATFORM:-}" ]; then
+    case "$(uname -s 2>/dev/null)" in
+        Darwin)  PLATFORM="macos"  ;;
+        *)       PLATFORM="linux"  ;;
+    esac
+fi
 
 BUILD_DIR="build/cmake"
 CMAKE_GENERATOR=""

@@ -59,11 +59,13 @@ die()  { echo -e "${RED}[build_mingw_gcc] ERROR:${RST} $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 #  Detect host platform
 # ---------------------------------------------------------------------------
-PLATFORM="linux"
-case "$(uname -s 2>/dev/null)" in
-    Darwin)              PLATFORM="macos"   ;;
-    MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
-esac
+if [ -z "${PLATFORM:-}" ]; then
+    case "$(uname -s 2>/dev/null)" in
+        Darwin)              PLATFORM="macos"   ;;
+        MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
+        *)                   PLATFORM="linux"  ;;
+    esac
+fi
 
 # ---------------------------------------------------------------------------
 #  Locate GNU make
