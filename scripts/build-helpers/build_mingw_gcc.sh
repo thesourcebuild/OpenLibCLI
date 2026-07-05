@@ -26,7 +26,7 @@
 #
 #  Environment variables
 #    CC=gcc                   Host compiler  (default: gcc)
-#    CROSS_CC=arm-none-eabi-gcc  Cross-compiler for 'embedded'
+#    CC=arm-none-eabi-gcc       Cross-compiler for 'embedded'
 #    PORT=2323                Telnet port for run-telnet
 #    BUILD_EXAMPLE_TELNET=0|1     Enable Telnet transport / telnet demo (default: 1)
 #    BUILD_EXAMPLE_TCP=0|1        Enable TCP transport / tcp demo (default: 0)
@@ -95,7 +95,7 @@ fi
 TARGETS=()
 BUILD_VARS=()
 PORT="${PORT:-2323}"
-CROSS_CC="${CROSS_CC:-arm-none-eabi-gcc}"
+
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -169,7 +169,7 @@ case "$TARGETS_STR" in
         echo ""
         echo "Environment:"
         echo "  CC=gcc                    Host compiler (default: gcc)"
-        echo "  CROSS_CC=arm-none-eabi-gcc  Cross-compiler for 'embedded'"
+        echo "  CC=arm-none-eabi-gcc         Cross-compiler for 'embedded'"
         echo "  PORT=2323                 Telnet port (default: 2323)"
         echo "  BUILD_ASAN=0|1               Build with AddressSanitizer (default: 0)"
         echo "  BUILD_EXAMPLE_TELNET=0|1      Enable Telnet transport / telnet demo"
@@ -186,7 +186,7 @@ case "$TARGETS_STR" in
         echo "  BUILD_ASAN=1 BUILD_EXAMPLE_SERIAL=1 ./scripts/build-helpers/build_mingw_gcc.sh run-serial"
         echo "  ./scripts/build-helpers/build_mingw_gcc.sh run-telnet 9999"
         echo "  CC=clang ./scripts/build-helpers/build_mingw_gcc.sh"
-        echo "  CROSS_CC=arm-none-eabi-gcc ./scripts/build-helpers/build_mingw_gcc.sh embedded"
+        echo "  CC=arm-none-eabi-gcc ./scripts/build-helpers/build_mingw_gcc.sh embedded"
         echo "  ./scripts/build-helpers/build_mingw_gcc.sh clean-all"
         echo ""
         exit 0
@@ -194,11 +194,11 @@ case "$TARGETS_STR" in
 
     embedded)
         info "Cross-compiling for embedded target ..."
-        info "CROSS_CC  : ${CROSS_CC}"
+        info "CC        : ${CC:-gcc}"
         info "Output    : build/gcc/embedded/"
         echo ""
-        "$MAKE_CMD" PLATFORM="$PLATFORM" \
-                    CROSS_CC="$CROSS_CC" "${BUILD_VARS[@]}" embedded
+        "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="embedded-baremetal" \
+                    "${BUILD_VARS[@]}" embedded
         ok "Embedded library: build/gcc/embedded/libs/libopenlibcli.a"
         ;;
 

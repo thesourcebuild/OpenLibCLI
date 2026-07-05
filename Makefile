@@ -163,6 +163,19 @@ BUILD_EXAMPLE_UNIX_SOCKET ?= 0
 endif
 
 # ---------------------------------------------------------------------------
+#  Embedded bare-metal overrides — only the static library, no host examples
+# ---------------------------------------------------------------------------
+ifeq ($(PLATFORM),embedded-baremetal)
+BUILD_EXAMPLE_TELNET = 0
+BUILD_EXAMPLE_TCP    = 0
+BUILD_EXAMPLE_SERIAL = 0
+BUILD_EXAMPLE_PIPE   = 0
+BUILD_EXAMPLE_UNIX_SOCKET = 0
+BUILD_LIB_STATIC     = 1
+BUILD_LIB_SHARED     = 0
+endif
+
+# ---------------------------------------------------------------------------
 #  Library type selection
 # ---------------------------------------------------------------------------
 BUILD_LIB_STATIC  ?= 0
@@ -434,13 +447,24 @@ endif
 #    make CFLAGS="-mcpu=cortex-m0 -mthumb -Os -Icli" embedded-baremetal
 # ---------------------------------------------------------------------------
 .PHONY: embedded-baremetal
+ifeq ($(PLATFORM),embedded-baremetal)
+embedded-baremetal: lib
+else
 embedded-baremetal: $(EMBED_LIB)
+endif
 	@echo ""
 	@echo "Embedded bare-metal build complete  [CC=$(CC)]"
+ifeq ($(PLATFORM),embedded-baremetal)
+	@echo "  Output dir : $(BUILD_DIR)/"
+	@echo "  Libraries  : $(LIB_DIR)/"
+	@echo "  Objects    : $(OBJ_DIR)/"
+	@echo "  Library    : $(STATIC_LIB_OUT)"
+else
 	@echo "  Output dir : $(EMBED_DIR)/"
 	@echo "  Libraries  : $(EMBED_LIB_DIR)/"
 	@echo "  Objects    : $(EMBED_OBJ_DIR)/"
 	@echo "  Library    : $(EMBED_LIB)"
+endif
 	@echo ""
 	@echo "  Link this library into your MCU firmware and implement"
 	@echo "  the serial callbacks via cli_serial_init()."
@@ -542,14 +566,14 @@ endif
 # ---------------------------------------------------------------------------
 #  Create output directories
 # ---------------------------------------------------------------------------
-$(BUILD_DIR) $(BIN_DIR) $(LIB_DIR):
+$(sort $(BUILD_DIR) $(BIN_DIR) $(LIB_DIR)):
 ifeq ($(OS),Windows_NT)
 	cmd /c if not exist "$(subst /,\,$@)" mkdir "$(subst /,\,$@)"
 else
 	mkdir -p $@
 endif
 
-$(OBJ_DIR) $(EMBED_DIR) $(EMBED_OBJ_DIR):
+$(sort $(OBJ_DIR) $(EMBED_DIR) $(EMBED_OBJ_DIR)):
 ifeq ($(OS),Windows_NT)
 	cmd /c if not exist "$(subst /,\,$@)" mkdir "$(subst /,\,$@)"
 	cmd /c if not exist "$(subst /,\,$(@)\utils)" if exist "$(subst /,\,$(@))" mkdir "$(subst /,\,$(@)\utils)"

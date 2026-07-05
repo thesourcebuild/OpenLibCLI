@@ -302,6 +302,13 @@ chmod +x scripts/build-helpers/build.sh
 ### GNU Make (GCC / MinGW / Clang)
 
 ```bash
+# Windows (MinGW — must pass CC=gcc explicitly)
+mingw32-make CC=gcc PLATFORM=windows
+mingw32-make CC=gcc PLATFORM=windows run-serial
+mingw32-make CC=gcc PLATFORM=windows run-telnet
+mingw32-make CC=gcc PLATFORM=windows run-tcp
+mingw32-make CC=gcc PLATFORM=windows clean
+
 # Linux / macOS
 make
 make run-telnet PORT=2323
@@ -310,18 +317,15 @@ make run-serial
 make clean
 make distclean
 
-# Windows (MinGW — must pass CC=gcc explicitly)
-mingw32-make CC=gcc PLATFORM=windows
-mingw32-make CC=gcc PLATFORM=windows run-serial
-mingw32-make CC=gcc PLATFORM=windows run-telnet
-mingw32-make CC=gcc PLATFORM=windows run-tcp
-mingw32-make CC=gcc PLATFORM=windows clean
-
-# Cross-compile for ARM bare-metal
-make CC=arm-none-eabi-gcc lib
-
-# Cross-compile for Windows from Linux
+# Cross-compile for Windows from Linux host/target OS
 make CC=x86_64-w64-mingw32-gcc PLATFORM=windows
+
+# Cross-compile for ARM target(linux) from Linux host/target OS
+make CC=arm-linux-gnueabihf-gcc
+
+# Cross-compile for ARM bare-metal from Linux host/target OS
+# will only generate a static libary for ARM microcontrollers
+make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal
 ```
 
 ### MSVC / NMake
