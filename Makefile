@@ -271,9 +271,11 @@ ifneq ($(BUILD_ASAN),0)
 	@echo "  Sanitizer     : AddressSanitizer"
 endif
 	@echo "  Map files     : $(BUILD_DIR)/"
+ifeq ($(BUILD_LIB_SHARED),1)
 	@echo "  Shared lib    : $(LIB_OUT)"
 ifneq ($(strip $(SHARED_IMPLIB_OUT)),)
 	@echo "  Import lib    : $(SHARED_IMPLIB_OUT)"
+endif
 endif
 ifeq ($(BUILD_LIB_STATIC),1)
 	@echo "  Static lib    : $(STATIC_LIB_OUT)"
@@ -469,11 +471,13 @@ endif
 	@echo "  Link this library into your MCU firmware and implement"
 	@echo "  the serial callbacks via cli_serial_init()."
 
+ifneq ($(PLATFORM),embedded-baremetal)
 $(EMBED_LIB): $(EMBED_LIB_OBJS) | $(EMBED_LIB_DIR)
 	$(AR) $(ARFLAGS) $@ $^
 
 $(EMBED_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(EMBED_OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+endif
 
 # ---------------------------------------------------------------------------
 #  AddressSanitizer target  —  rebuild everything with -fsanitize=address
@@ -566,14 +570,14 @@ endif
 # ---------------------------------------------------------------------------
 #  Create output directories
 # ---------------------------------------------------------------------------
-$(sort $(BUILD_DIR) $(BIN_DIR) $(LIB_DIR)):
+$(sort $(BUILD_DIR) $(BIN_DIR) $(LIB_DIR) $(EMBED_DIR)):
 ifeq ($(OS),Windows_NT)
 	cmd /c if not exist "$(subst /,\,$@)" mkdir "$(subst /,\,$@)"
 else
 	mkdir -p $@
 endif
 
-$(sort $(OBJ_DIR) $(EMBED_DIR) $(EMBED_OBJ_DIR)):
+$(sort $(OBJ_DIR) $(EMBED_OBJ_DIR)):
 ifeq ($(OS),Windows_NT)
 	cmd /c if not exist "$(subst /,\,$@)" mkdir "$(subst /,\,$@)"
 	cmd /c if not exist "$(subst /,\,$(@)\utils)" if exist "$(subst /,\,$(@))" mkdir "$(subst /,\,$(@)\utils)"
