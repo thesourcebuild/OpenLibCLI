@@ -578,7 +578,7 @@ else
 	-$(RM) $(BUILD_DIR)/*.map $(BUILD_DIR)/*.obj $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d \
 	      $(BUILD_DIR)/*.a $(BUILD_DIR)/*.lib $(BUILD_DIR)/*.so $(BUILD_DIR)/*.dll $(BUILD_DIR)/*.dylib \
 	      $(BUILD_DIR)/*.exe $(BUILD_DIR)/*.out $(BUILD_DIR)/*.app \
-	      $(BUILD_DIR)/*.pdb $(BUILD_DIR)/*.ilk)
+	      $(BUILD_DIR)/*.pdb $(BUILD_DIR)/*.ilk
 endif
 	@echo "Cleaned contents of $(BUILD_DIR)/ (folder kept)."
 
