@@ -131,8 +131,17 @@ int main(int argc, char *argv[]) {
 #else
         cli_init(&demo_cli, "router", &transport, NULL, demo_cmd_pool, CLI_MAX_COMMANDS);
 #endif
-        demo_register_commands(&demo_cli);
 
+        //>! These are the defaults. For demonstration setting them explicitly here.
+        cli_set_exit_root_policy(&demo_cli, CLI_EXIT_ROOT_POLICY_CLOSE_SESSION);
+        cli_set_quit_policy(&demo_cli, CLI_QUIT_POLICY_CLOSE_SESSION);
+        cli_set_auth_failure_mode(&demo_cli, CLI_AUTH_FAILURE_MODE_CLOSE);
+
+        // cli_set_exit_root_policy(&demo_cli, CLI_EXIT_ROOT_POLICY_RESET_SESSION);
+        // cli_set_quit_policy(&demo_cli, CLI_QUIT_POLICY_RESET_SESSION);
+        // cli_set_auth_failure_mode(&demo_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
+
+        demo_register_commands(&demo_cli);
         demo_setup_session(&demo_cli, &s_app, session_num, 12345, 11000, CLI_DEMO_BANNER_TELNET);
 
         int8_t rc = cli_server_loop(&demo_cli);

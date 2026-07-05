@@ -3499,8 +3499,8 @@ static int8_t cli_auth_verify(cli_struct_t *cli) {
     CLI_WSTR(cli, "% Authentication failed.\r\n");
 
     if (cli->auth_attempts >= 3) {
-      CLI_WSTR(cli, "% Too many failed attempts.\r\n");
       if (cli->auth_failure_mode == CLI_AUTH_FAILURE_MODE_LOCKOUT) {
+        CLI_WSTR(cli, "% Too many failed attempts. Lock-Out Session.\r\n");
         cli->auth_state = CLI_AUTH_LOCKOUT;
 #if CLI_ENABLE_TIME_SOURCE
         if (cli->time_source != NULL) {
@@ -3509,6 +3509,7 @@ static int8_t cli_auth_verify(cli_struct_t *cli) {
 #endif
         rc = CLI_OK;
       } else {
+        CLI_WSTR(cli, "% Too many failed attempts. Closing Session.\r\n");
         cli->session_state = CLI_SESSION_STOP;
         rc = CLI_ERR_AUTH;
       }
