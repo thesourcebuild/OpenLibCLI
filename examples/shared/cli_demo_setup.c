@@ -50,7 +50,7 @@
  * Private Function Prototypes
  *=======================================================================================*/
 
-static int8_t demo_periodic_cb(cli_struct_t *cli);
+static int8_t demo_periodic_cb(const cli_struct_t *cli);
 
 /*=======================================================================================
  * External Data Variables
@@ -142,7 +142,7 @@ int8_t cmd_show_version(cli_struct_t *cli, const char *cmd, cli_argc_t argc, con
 }
 
 int8_t cmd_show_counters(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
-  demo_app_data_struct_t *app = (demo_app_data_struct_t *)cli_get_userdata(cli);
+  const demo_app_data_struct_t *app = (demo_app_data_struct_t *)cli_get_userdata(cli);
   (void)cmd;
   (void)argc;
   (void)argv;
@@ -296,7 +296,7 @@ void cli_sleep_ms(uint32_t ms) {
  * Private Functions
  *=======================================================================================*/
 
-static int8_t demo_periodic_cb(cli_struct_t *cli) {
+static int8_t demo_periodic_cb(const cli_struct_t *cli) {
   demo_app_data_struct_t *app = (demo_app_data_struct_t *)cli_get_userdata(cli);
 
   if (app) {

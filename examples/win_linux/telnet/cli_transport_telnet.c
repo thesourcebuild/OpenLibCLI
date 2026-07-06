@@ -15,7 +15,7 @@
 /*=======================================================================================
  * Includes
  *=======================================================================================*/
-#include <cli_env_detect.h>
+#include "cli_env_detect.h"
 #include "cli_transport_telnet.h"
 
 #include <stdio.h>
@@ -148,8 +148,8 @@ static int32_t cli_telnet_winsock_init(void);
 #endif
 static int32_t cli_set_recv_timeout_ms(cli_sock_t sock, int32_t timeout_ms);
 
-static void telnet_respond(cli_telnet_ctx_struct_t *ctx, uint8_t verb, uint8_t opt);
-static bool telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, uint8_t *out);
+static void cli_telnet_respond(cli_telnet_ctx_struct_t *ctx, uint8_t verb, uint8_t opt);
+static bool cli_telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, uint8_t *out);
 
 static cli_transport_ret_t cli_telnet_transport_available(void *raw_ctx);
 static cli_transport_ret_t cli_telnet_transport_read(void *raw_ctx);
@@ -314,7 +314,7 @@ int8_t cli_telnet_handler(cli_telnet_ctx_struct_t *ctx) {
         uint16_t wp = ctx->rx_len;
         for (uint16_t i = ctx->rx_len; i < end && wp < sizeof(ctx->rx_buf); i++) {
           uint8_t out;
-          if (telnet_process_byte(ctx, ctx->rx_buf[i], &out)) {
+          if (cli_telnet_process_byte(ctx, ctx->rx_buf[i], &out)) {
             ctx->rx_buf[wp++] = out;
           }
         }
@@ -418,7 +418,7 @@ static cli_transport_ret_t cli_telnet_send_all(cli_sock_t sock, const uint8_t *b
  * @param[in] verb  Telnet verb byte.
  * @param[in] opt   Telnet option byte.
  */
-static void telnet_respond(cli_telnet_ctx_struct_t *ctx, uint8_t verb, uint8_t opt) {
+static void cli_telnet_respond(cli_telnet_ctx_struct_t *ctx, uint8_t verb, uint8_t opt) {
   uint8_t response[3];
   bool send_response = true;
 
@@ -496,12 +496,12 @@ static void telnet_respond(cli_telnet_ctx_struct_t *ctx, uint8_t verb, uint8_t o
  *
  * Feeds a single raw byte into the telnet state machine, which either
  * stores decoded user data into the rx buffer or triggers IAC negotiation
- * responses via @c telnet_respond().
+ * responses via @c cli_telnet_respond().
  *
  * @param[in,out] ctx  Telnet context (state machine state + rx buffer).
  * @param[in]     byte The next byte from the raw socket read.
  */
-static bool telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, uint8_t *out) {
+static bool cli_telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, uint8_t *out) {
   bool stored = false;
 
   switch (ctx->state) {
@@ -531,7 +531,7 @@ static bool telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, uint
     break;
 
   case TELNET_STATE_VERB:
-    telnet_respond(ctx, ctx->verb, byte);
+    cli_telnet_respond(ctx, ctx->verb, byte);
     ctx->state = TELNET_STATE_NORMAL;
     break;
 
@@ -608,11 +608,13 @@ static cli_transport_ret_t cli_telnet_transport_read(void *raw_ctx) {
   cli_telnet_ctx_struct_t *ctx = (cli_telnet_ctx_struct_t *)raw_ctx;
   cli_transport_ret_t result = CLI_TELNET_ERR;
 
-  if (ctx->rx_pos < ctx->rx_len) {
-    result = ctx->rx_buf[ctx->rx_pos++];
-    if (ctx->rx_pos >= ctx->rx_len) {
-      ctx->rx_pos = 0;
-      ctx->rx_len = 0;
+  if (ctx) {
+    if (ctx->rx_pos < ctx->rx_len) {
+      result = (cli_transport_ret_t)ctx->rx_buf[ctx->rx_pos++];
+      if (ctx->rx_pos >= ctx->rx_len) {
+        ctx->rx_pos = 0;
+        ctx->rx_len = 0;
+      }
     }
   }
 
