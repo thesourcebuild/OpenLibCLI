@@ -1,10 +1,10 @@
-# OpenLibCLI Library
+# OpenLibCLI
 
 A command-line interface library written in **pure C99** with **100 % static memory allocation**. Runs on Windows, Linux/macOS, and MCUs (AVR, ARM, RISC-V) with any byte-stream transport (Telnet, TCP, serial, pipes, UNIX sockets, or custom). Includes hierarchical command registration, tab completion, command history, privilege levels, pipe filters, and authentication.
 
 ## Table of Contents
 
-- [OpenLibCLI Library](#openlibcli-library)
+- [OpenLibCLI](#openlibcli)
   - [Table of Contents](#table-of-contents)
   - [Features](#features)
   - [Use Cases](#use-cases)
