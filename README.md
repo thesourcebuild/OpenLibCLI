@@ -219,8 +219,8 @@ Listens on TCP port **2323** by default, accepts one client at a time, and serve
 
 See the [`examples-embedded/`](examples-embedded) directory for microcontrollers demos:
 
-- **STM32-NUCLEO-F103RB** — [`OpenLibCLI-Embedded-Demos/STM32/serial/`](https://github.com/thesourcebuild/OpenLibCLI-Embedded-Demos/tree/main/STM32/serial/) — STM32CubeIDE\Keil\IAR EW ARM project with USART2 transport
-- **Arduino** — [`OpenLibCLI-Embedded-Demos/Arduino/`](https://github.com/thesourcebuild/OpenLibCLI-Embedded-Demos/tree/main/Arduino/) — Arduino IDE ready sketch.
+- **STM32-NUCLEO-F103RB** — [`OpenLibCLI-Embedded-Demos/STM32/serial/`](https://github.com/thesourcebuild/OpenLibCLI-Embedded-Demos/tree/master/STM32/serial/) — STM32CubeIDE\Keil\IAR EW ARM project with USART2 transport
+- **Arduino** — [`OpenLibCLI-Embedded-Demos/Arduino/`](https://github.com/thesourcebuild/OpenLibCLI-Embedded-Demos/tree/master/Arduino/) — Arduino IDE ready sketch.
 
   ```
   OpenLibCLI-Embedded-Demos/Arduino/OpenLibCLI/
