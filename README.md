@@ -1,6 +1,6 @@
 # OpenLibCLI Library
 
-A command-line interface library written in **pure C99** with **100 % static memory allocation**. Runs on Windows, Linux/macOS, and MCUs (AVR, ARM, RISC-V) with any byte-stream transport (Telnet, TCP, serial, pipes, UNIX sockets, or custom).
+A command-line interface library written in **pure C99** with **100 % static memory allocation**. Runs on Windows, Linux/macOS, and MCUs (AVR, ARM, RISC-V) with any byte-stream transport (Telnet, TCP, serial, pipes, UNIX sockets, or custom). Includes hierarchical command registration, tab completion, command history, privilege levels, pipe filters, and authentication.
 
 ## Table of Contents
 
@@ -684,12 +684,6 @@ These are registered by calling `cli_add_builtin_cmds(cli)`:
 | `usage keys` | any | user | Show line-edit key bindings |
 | `history` | any | user | Display command history |
 | `clear` | any | user | Clear terminal screen |
-
----
-
-## API Reference
-
-See [`cli/cli.h`](cli/cli.h) for the full API reference including lifecycle, configuration, authentication, command registration, running, output, mode/privilege, and return codes.
 
 ---
 
