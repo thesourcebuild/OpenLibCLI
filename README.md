@@ -24,22 +24,22 @@ A command-line interface library written in **pure C99** with **100 % static mem
   - [Transport Layer](#transport-layer)
     - [Built-in transports](#built-in-transports)
     - [Custom transport](#custom-transport)
-  - [Command Registration](#command-registration)
-    - [Command handler signature](#command-handler-signature)
-  - [Privilege Levels and Modes](#privilege-levels-and-modes)
-    - [Privilege levels](#privilege-levels)
-    - [Built-in modes](#built-in-modes)
-    - [Custom modes](#custom-modes)
-  - [Output and Pipe Filters](#output-and-pipe-filters)
-  - [Authentication](#authentication)
-  - [Non-Blocking / Embedded Usage](#non-blocking--embedded-usage)
-  - [Programmatic Command Execution](#programmatic-command-execution)
-    - [`cli_exec` — Execute a command string](#cli_exec--execute-a-command-string)
-    - [`cli_exec_argv` — Execute pre-parsed arguments](#cli_exec_argv--execute-pre-parsed-arguments)
-    - [No-op transport (silent execution)](#no-op-transport-silent-execution)
-    - [Capturing output](#capturing-output)
-  - [Built-in Commands](#built-in-commands)
   - [API Reference](#api-reference)
+    - [Command Registration](#command-registration)
+      - [Command handler signature](#command-handler-signature)
+    - [Privilege Levels and Modes](#privilege-levels-and-modes)
+      - [Privilege levels](#privilege-levels)
+      - [Built-in modes](#built-in-modes)
+      - [Custom modes](#custom-modes)
+    - [Output and Pipe Filters](#output-and-pipe-filters)
+    - [Authentication](#authentication)
+    - [Non-Blocking / Embedded Usage](#non-blocking--embedded-usage)
+    - [Programmatic Command Execution](#programmatic-command-execution)
+      - [`cli_exec` — Execute a command string](#cli_exec--execute-a-command-string)
+      - [`cli_exec_argv` — Execute pre-parsed arguments](#cli_exec_argv--execute-pre-parsed-arguments)
+      - [No-op transport (silent execution)](#no-op-transport-silent-execution)
+      - [Capturing output](#capturing-output)
+    - [Built-in Commands](#built-in-commands)
   - [Platform Notes](#platform-notes)
     - [Linux / macOS](#linux--macos)
     - [Windows (MinGW)](#windows-mingw)
@@ -426,7 +426,11 @@ cli_transport_struct_t tp = {
 
 ---
 
-## Command Registration
+## API Reference
+
+See [`cli/cli.h`](cli/cli.h) for the full API reference including lifecycle, configuration, authentication, command registration, running, output, mode/privilege, and return codes.
+
+### Command Registration
 
 Each session carries its own command pool passed to `cli_init()`. Register commands after initialising the session.
 
@@ -461,7 +465,7 @@ void setup_commands(void)
 }
 ```
 
-### Command handler signature
+#### Command handler signature
 
 ```c
 static int8_t my_handler(cli_struct_t *cli, const char *cmd,
@@ -476,9 +480,9 @@ static int8_t my_handler(cli_struct_t *cli, const char *cmd,
 
 ---
 
-## Privilege Levels and Modes
+### Privilege Levels and Modes
 
-### Privilege levels
+#### Privilege levels
 
 | Constant | Value | Meaning |
 |---|---|---|
@@ -487,7 +491,7 @@ static int8_t my_handler(cli_struct_t *cli, const char *cmd,
 | `CLI_PRIV_PRIVILEGED` | 10 | Privileged (`enable` mode) |
 | `CLI_PRIV_SUPERADMIN` | 15 | Super-admin mode |
 
-### Built-in modes
+#### Built-in modes
 
 | Constant | Value | Prompt style |
 |---|---|---|
@@ -497,7 +501,7 @@ static int8_t my_handler(cli_struct_t *cli, const char *cmd,
 | `CLI_MODE_CONFIG` | 3 | `router(config)#` |
 | `CLI_MODE_USER_BASE` | 20 | First user-defined mode |
 
-### Custom modes
+#### Custom modes
 
 ```c
 #define MODE_INTERFACE  (CLI_MODE_USER_BASE + 0)
@@ -511,7 +515,7 @@ cli_set_mode(cli, MODE_INTERFACE);
 
 ---
 
-## Output and Pipe Filters
+### Output and Pipe Filters
 
 Use `cli_println()` inside command handlers. Output is automatically passed through any active pipe filter the user appended to the command.
 
@@ -541,7 +545,7 @@ Interface GigE0/1  status down
 
 ---
 
-## Authentication
+### Authentication
 
 ```c
 // Option A — local table (up to CLI_MAX_USERS entries)
@@ -565,7 +569,7 @@ cli_set_enable_secret(cli, "cisco");
 
 ---
 
-## Non-Blocking / Embedded Usage
+### Non-Blocking / Embedded Usage
 
 For bare-metal MCUs or RTOS tasks, call `cli_session_engine()` in a bare-metal super-loop or RTOS task/thread loop:
 
@@ -591,11 +595,11 @@ void cli_task(void *arg)
 
 ---
 
-## Programmatic Command Execution
+### Programmatic Command Execution
 
 Execute commands directly through the API without feeding bytes through a transport. Output is still sent through `transport->write()` — use a no-op transport (shown below) to discard or capture it.
 
-### `cli_exec` — Execute a command string
+#### `cli_exec` — Execute a command string
 
 ```c
 int8_t result = cli_exec(&s_cli, "show version");
@@ -606,7 +610,7 @@ if (result == CLI_OK) {
 
 Copies the string into the internal input buffer, runs the full pipeline (trim, tokenize, resolve, callback), and resets the buffer.
 
-### `cli_exec_argv` — Execute pre-parsed arguments
+#### `cli_exec_argv` — Execute pre-parsed arguments
 
 ```c
 const char *args[] = {"show", "version"};
@@ -615,7 +619,7 @@ int8_t result = cli_exec_argv(&s_cli, args, 2);
 
 Joins `argv[0..argc-1]` with spaces and calls `cli_exec()`. A thin convenience wrapper when you already have tokenized input.
 
-### No-op transport (silent execution)
+#### No-op transport (silent execution)
 
 ```c
 static cli_transport_ret_t nop_available(void *ctx) { (void)ctx; return 0; }
@@ -639,7 +643,7 @@ cli_add_builtin_cmds(&s_cli);
 cli_exec(&s_cli, "show version");   // runs silently
 ```
 
-### Capturing output
+#### Capturing output
 
 Replace `write` with a callback that appends to a buffer:
 
@@ -662,7 +666,7 @@ static cli_transport_ret_t cap_write(void *ctx, const uint8_t *data,
 
 ---
 
-## Built-in Commands
+### Built-in Commands
 
 These are registered by calling `cli_add_builtin_cmds(cli)`:
 
