@@ -32,6 +32,7 @@ obj/
 *.log
 *.tmp
 lint_output.txt
+install
 
 # OS generated files
 .DS_Store
