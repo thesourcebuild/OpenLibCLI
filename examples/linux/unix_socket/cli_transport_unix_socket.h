@@ -78,6 +78,11 @@ extern "C" {
 /** @brief Operation failed. */
 #define CLI_UNIX_SOCK_ERR (-1)
 
+#ifndef CLI_UNIX_SEND_TIMEOUT_MS
+/** @brief A send blocked for this long (client not reading) ends the session. */
+#define CLI_UNIX_SEND_TIMEOUT_MS 5000
+#endif
+
 /*=======================================================================================
  * Public Macros
  *=======================================================================================*/
@@ -126,6 +131,10 @@ int32_t cli_unix_listen(const char *path);
 
 /**
  * @brief Block until one client connects to @p listen_fd.
+ *
+ * Sets @c SO_SNDTIMEO (@c CLI_UNIX_SEND_TIMEOUT_MS) on the accepted socket, so a
+ * client that stops reading ends its session instead of blocking the server, and
+ * on macOS also @c SO_NOSIGPIPE.
  *
  * @param[in] listen_fd  Fd returned by @c cli_unix_listen().
  *

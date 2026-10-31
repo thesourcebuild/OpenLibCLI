@@ -40,7 +40,7 @@
  *   }
  *
  *   cli_done(&cli);
- *   cli_pipe_close(&pipe_ctx);
+ *   cli_named_pipe_disconnect(&pipe_ctx);  // waits for the client to leave
  * @endcode
  *
  * **Quick-start - named pipe client**
@@ -104,6 +104,12 @@ extern "C" {
 /** @brief Operation failed. */
 #define CLI_PIPE_ERR (-1)
 
+#ifndef CLI_PIPE_CONNECT_TIMEOUT_MS
+/** @brief Windows: how long @c cli_named_pipe_connect() waits for the server to accept
+ *         (it may be serving another client, or re-creating the pipe between sessions). */
+#define CLI_PIPE_CONNECT_TIMEOUT_MS 10000U
+#endif
+
 /*=======================================================================================
  * Public Macros
  *=======================================================================================*/
@@ -158,6 +164,11 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx);
 /**
  * @brief Connect to a server blocked in @c cli_named_pipe_listen().
  *
+ * - Windows: the server has a single pipe instance. While it is busy (serving
+ *   another client) or between sessions (pipe not yet re-created), the call keeps
+ *   waiting, up to @c CLI_PIPE_CONNECT_TIMEOUT_MS in total.
+ * - POSIX: blocks in @c open() until the server has opened its FIFO ends.
+ *
  * @param[in]  name  Logical name or base path.
  * @param[out] ctx   Caller-allocated context that must outlive the session.
  *
@@ -199,6 +210,20 @@ void cli_pipe_init(cli_pipe_ctx_struct_t *ctx, cli_transport_struct_t *transport
  * @param[in] ctx  Pipe context to close.
  */
 void cli_pipe_close(cli_pipe_ctx_struct_t *ctx);
+
+/**
+ * @brief End a server session obtained from @c cli_named_pipe_listen().
+ *
+ * Unlike @c cli_pipe_close(), waits for the client to finish:
+ * - Windows: flushes buffered output to the client, then disconnects the pipe.
+ * - POSIX: closes @c <name>.out (the client reads the rest, then sees EOF) and
+ *   waits until the client has closed @c <name>.in. Without this the next
+ *   @c cli_named_pipe_listen() would open @c <name>.out against the previous
+ *   client's still-open reader and start a session nobody is attached to.
+ *
+ * @param[in] ctx  Server-side pipe context.
+ */
+void cli_named_pipe_disconnect(cli_pipe_ctx_struct_t *ctx);
 
 /** @} */
 

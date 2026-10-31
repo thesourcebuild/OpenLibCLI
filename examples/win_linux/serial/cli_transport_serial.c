@@ -67,7 +67,6 @@ static cli_transport_ret_t cli_serial_transport_available(void *raw_ctx);
 static cli_transport_ret_t cli_serial_transport_read(void *raw_ctx);
 static cli_transport_ret_t cli_serial_transport_write(void *raw_ctx, const uint8_t *buf,
                                                       cli_transport_buflen_t len);
-static cli_transport_ret_t cli_serial_transport_flush(void *raw_ctx);
 
 #if ENV_IS_WINDOWS
 static void serial_key_set(const char *seq);
@@ -92,7 +91,9 @@ void cli_serial_init(cli_transport_struct_t *transport) {
   transport->available = cli_serial_transport_available;
   transport->read = cli_serial_transport_read;
   transport->write = cli_serial_transport_write;
-  transport->flush = cli_serial_transport_flush;
+  /* write() / _putch() are unbuffered: nothing to flush (fsync() on a tty fails, and on a
+   * redirected stdout it would force a disk sync after every prompt). */
+  transport->flush = NULL;
   transport->ctx = NULL;
   transport->kind = CLI_TRANSPORT_SERIAL;
 }
@@ -214,23 +215,6 @@ static cli_transport_ret_t cli_serial_transport_write(void *raw_ctx, const uint8
   (void)len;
   return -1;
 #endif
-}
-
-/**
- * @brief Flush the host serial output stream when supported.
- *
- * @param[in] raw_ctx  Unused.
- *
- * @return Always @c 0.
- */
-static cli_transport_ret_t cli_serial_transport_flush(void *raw_ctx) {
-  (void)raw_ctx;
-
-#if ENV_IS_UNIX_LIKE
-  fsync(STDOUT_FILENO);
-#endif
-
-  return 0;
 }
 
 #if ENV_IS_WINDOWS

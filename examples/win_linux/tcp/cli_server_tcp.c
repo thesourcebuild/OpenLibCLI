@@ -16,6 +16,7 @@
  *=======================================================================================*/
 #include "../../../cli/cli_env_detect.h"
 #include "../../shared/cli_demo_setup.h"
+#include <utils/cli_args_parse.h>
 #include "cli_transport_tcp.h"
 #include "cli_server_tcp.h"
 
@@ -84,8 +85,10 @@ static int8_t cli_server_loop(cli_struct_t *cli);
 int main(int argc, char *argv[]) {
   uint16_t port = TCP_SERVER_DEFAULT_PORT;
 
-  if (argc > 1) {
-    port = (uint16_t)strtol(argv[1], NULL, 10);
+  if (argc > 1 && (!parse_u16(argv[1], &port) || port == 0U)) {
+    /* 0 would bind a random ephemeral port; anything else invalid must not be guessed at. */
+    fprintf(stderr, "Invalid port '%s' (expected 1..65535)\n", argv[1]);
+    return 1;
   }
 
   int32_t listen_fd = cli_tcp_listen(port);

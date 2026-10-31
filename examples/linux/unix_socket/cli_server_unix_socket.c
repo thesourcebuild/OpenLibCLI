@@ -40,9 +40,11 @@
 
 #if ENV_IS_UNIX_LIKE
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -55,8 +57,8 @@
 /** @brief MOTD banner displayed to clients on connection. */
 #define CLI_DEMO_BANNER_UNIX                                                                       \
   "************************************************************\r\n"                               \
-  "*         OpenLibCLI  --  UNIX Domain Socket              *\r\n"                                \
-  "*         Pure-C, 100%% Static Allocation CLI Engine        *\r\n"                              \
+  "*         OpenLibCLI  --  UNIX Domain Socket               *\r\n"                               \
+  "*         Pure-C, 100% Static Allocation CLI Engine        *\r\n"                               \
   "************************************************************"
 #endif
 
@@ -93,6 +95,9 @@ static demo_app_data_struct_t s_app; /**< Per-session application data. */
 static struct termios s_orig_term;
 static int32_t s_raw_mode;
 static volatile sig_atomic_t s_stop; /**< Set by SIGINT / SIGTERM to shut the server down. */
+/** Self-pipe: the stop handler writes a byte so a waiting poll() wakes up at once, however
+ *  the signal races with the wait (a flag checked before a blocking call can be missed). */
+static int s_stop_pipe[2] = {-1, -1};
 #endif
 
 /*=======================================================================================
@@ -104,15 +109,17 @@ static int8_t cmd_show_socket(cli_struct_t *cli, const char *cmd, cli_argc_t arg
                               const char *argv[]);
 static void register_commands(cli_struct_t *cli);
 static void setup_session(cli_struct_t *cli, uint32_t session_id);
-static void run_server(const char *path);
+static int run_server(const char *path);
 static void *relay_reader_fn(void *arg);
 static void *relay_writer_fn(void *arg);
 static void client_raw_mode(void);
 static void client_restore_term(void);
-static void run_client(const char *path);
+static int run_client(const char *path);
 static void print_usage(const char *prog);
 static int8_t cli_server_loop(cli_struct_t *cli);
 static void on_stop_signal(int sig);
+static bool stop_signals_install(void);
+static int wait_readable_or_stop(int32_t fd, int timeout_ms);
 #endif
 
 /*=======================================================================================
@@ -148,9 +155,9 @@ int main(int argc, char *argv[]) {
 
   if (run_app) {
     if (strcmp(mode, "client") == 0) {
-      run_client(path);
+      rc = run_client(path);
     } else {
-      run_server(path);
+      rc = run_server(path);
     }
   }
 
@@ -176,13 +183,11 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
   while (rc == CLI_OK && !s_stop) {
     /* Sleep until input arrives (or the poll interval elapses for timers), instead of
      * spinning on the non-blocking available() check. */
-    struct pollfd pfd;
-    pfd.fd = ((cli_unix_socket_ctx_struct_t *)cli->transport.ctx)->fd;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
-    (void)poll(&pfd, 1, CLI_TRANSPORT_POLL_MS);
-
-    rc = cli_session_engine(cli);
+    (void)wait_readable_or_stop(((cli_unix_socket_ctx_struct_t *)cli->transport.ctx)->fd,
+                                CLI_TRANSPORT_POLL_MS);
+    if (!s_stop) {
+      rc = cli_session_engine(cli);
+    }
   }
   if (rc == CLI_OK) {
     rc = CLI_ERR_QUIT; /* stopped by signal */
@@ -197,8 +202,60 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
  * @param[in] sig  Signal number (unused).
  */
 static void on_stop_signal(int sig) {
+  int saved_errno = errno;
+
   (void)sig;
   s_stop = 1;
+  if (s_stop_pipe[1] >= 0) {
+    (void)write(s_stop_pipe[1], "", 1); /* async-signal-safe; non-blocking end */
+  }
+  errno = saved_errno;
+}
+
+/**
+ * @brief Create the stop self-pipe and install the SIGINT / SIGTERM handler.
+ *
+ * @return @c true on success.
+ */
+static bool stop_signals_install(void) {
+  struct sigaction sa;
+  bool ok = (pipe(s_stop_pipe) == 0);
+
+  if (ok) {
+    int flags = fcntl(s_stop_pipe[1], F_GETFL, 0);
+    ok = (flags >= 0 && fcntl(s_stop_pipe[1], F_SETFL, flags | O_NONBLOCK) == 0);
+  }
+  if (ok) {
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_stop_signal;
+    sigemptyset(&sa.sa_mask);
+    ok = (sigaction(SIGINT, &sa, NULL) == 0 && sigaction(SIGTERM, &sa, NULL) == 0);
+  }
+
+  return ok;
+}
+
+/**
+ * @brief Wait until @p fd is readable, a stop signal arrives, or @p timeout_ms passes.
+ *
+ * @param[in] fd          Descriptor to wait on.
+ * @param[in] timeout_ms  Timeout in milliseconds (-1 = no timeout).
+ *
+ * @return 1 if @p fd is readable (or reports hang-up / error), 0 otherwise.
+ */
+static int wait_readable_or_stop(int32_t fd, int timeout_ms) {
+  struct pollfd pfd[2];
+  int ready;
+
+  pfd[0].fd = fd;
+  pfd[0].events = POLLIN;
+  pfd[0].revents = 0;
+  pfd[1].fd = s_stop_pipe[0];
+  pfd[1].events = POLLIN;
+  pfd[1].revents = 0;
+
+  ready = poll(pfd, 2, timeout_ms);
+  return (ready > 0 && pfd[0].revents != 0) ? 1 : 0;
 }
 
 /**
@@ -248,24 +305,28 @@ static void setup_session(cli_struct_t *cli, uint32_t session_id) {
  * @brief Listen on @p path and serve sequential CLI sessions.
  *
  * @param[in] path  UNIX socket filesystem path.
+ *
+ * @return 0 after a clean shutdown, 1 if the server could not be started.
  */
-static void run_server(const char *path) {
-  struct sigaction sa;
+static int run_server(const char *path) {
+  int status = 0;
+  int32_t srv_fd = CLI_UNIX_SOCK_ERR;
 
   signal(SIGPIPE, SIG_IGN);
 
-  /* No SA_RESTART: a blocking accept() returns EINTR so the loop can shut down. */
-  memset(&sa, 0, sizeof(sa));
-  sa.sa_handler = on_stop_signal;
-  sigemptyset(&sa.sa_mask);
-  (void)sigaction(SIGINT, &sa, NULL);
-  (void)sigaction(SIGTERM, &sa, NULL);
-
-  int32_t srv_fd = cli_unix_listen(path);
-  if (srv_fd < 0) {
-    perror("cli_unix_listen");
-    fprintf(stderr, "Failed to create socket at '%s'\n", path);
+  if (!stop_signals_install()) {
+    perror("stop signal setup");
+    status = 1;
   } else {
+    srv_fd = cli_unix_listen(path);
+    if (srv_fd < 0) {
+      perror("cli_unix_listen");
+      fprintf(stderr, "Failed to create socket at '%s'\n", path);
+      status = 1;
+    }
+  }
+
+  if (srv_fd >= 0) {
     printf("OpenLibCLI UNIX socket server listening.\n");
     printf("  Socket : %s\n\n", path);
     printf("Connect with:\n");
@@ -278,6 +339,11 @@ static void run_server(const char *path) {
     while (!s_stop) {
       printf("Waiting for connection ...\n");
       fflush(stdout);
+
+      /* Wait for a client or a stop request; only then block in accept(). */
+      if (wait_readable_or_stop(srv_fd, -1) == 0) {
+        continue; /* stop requested (or poll interrupted): re-check s_stop */
+      }
 
       int32_t conn_fd = cli_unix_accept(srv_fd);
       if (conn_fd < 0) {
@@ -309,6 +375,8 @@ static void run_server(const char *path) {
     cli_unix_unlink(path);
     printf("Server stopped; removed %s\n", path);
   }
+
+  return status;
 }
 
 /**
@@ -390,8 +458,16 @@ static void client_restore_term(void) {
  * @brief Connect to the server at @p path and relay stdin and stdout.
  *
  * @param[in] path  UNIX socket filesystem path.
+ *
+ * @return 0 when the session ran, 1 if the connection failed.
  */
-static void run_client(const char *path) {
+static int run_client(const char *path) {
+  int status = 0;
+
+  /* A keystroke sent just after the server closed must fail with EPIPE, not kill the client
+   * with the terminal still in raw mode. */
+  signal(SIGPIPE, SIG_IGN);
+
   printf("Connecting to %s ...\n", path);
   fflush(stdout);
 
@@ -400,6 +476,7 @@ static void run_client(const char *path) {
     perror("cli_unix_connect");
     fprintf(stderr, "Failed to connect to '%s'\n", path);
     fprintf(stderr, "  (Is the server running?)\n");
+    status = 1;
   } else {
     printf("Connected. Type 'exit' or 'quit' to end the session.\n\n");
     fflush(stdout);
@@ -428,6 +505,8 @@ static void run_client(const char *path) {
     cli_unix_close(fd);
     printf("\nSession closed.\n");
   }
+
+  return status;
 }
 
 /**

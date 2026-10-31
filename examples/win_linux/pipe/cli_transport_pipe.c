@@ -97,14 +97,33 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
     handle = CreateNamedPipeA(path, PIPE_ACCESS_DUPLEX,
                               PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0,
                               NULL);
+  } else {
+    SetLastError(ERROR_FILENAME_EXCED_RANGE); /* a truncated name would be another pipe */
   }
   if (handle != INVALID_HANDLE_VALUE) {
-    if (ConnectNamedPipe(handle, NULL) || GetLastError() == ERROR_PIPE_CONNECTED) {
+    BOOL connected = FALSE;
+    BOOL waiting = TRUE;
+
+    while (waiting) {
+      if (ConnectNamedPipe(handle, NULL) || GetLastError() == ERROR_PIPE_CONNECTED) {
+        connected = TRUE;
+        waiting = FALSE;
+      } else if (GetLastError() == ERROR_NO_DATA) {
+        /* A client connected and closed again before we got here: wait for the next. */
+        (void)DisconnectNamedPipe(handle);
+      } else {
+        waiting = FALSE;
+      }
+    }
+
+    if (connected) {
       ctx->h_read = (void *)handle;
       ctx->h_write = (void *)handle;
       rc = CLI_PIPE_OK;
     } else {
+      DWORD error = GetLastError();
       CloseHandle(handle);
+      SetLastError(error); /* report the cause, not CloseHandle's result */
     }
   }
 
@@ -115,28 +134,35 @@ int32_t cli_named_pipe_connect(const char *name, cli_pipe_ctx_struct_t *ctx) {
   char path[PIPE_PATH_MAX];
   HANDLE handle = INVALID_HANDLE_VALUE;
   int32_t rc = CLI_PIPE_ERR;
-  int32_t attempts = (build_win_pipe_path(path, sizeof(path), name)) ? 0 : 5;
+  bool trying = build_win_pipe_path(path, sizeof(path), name);
+  ULONGLONG deadline = GetTickCount64() + (ULONGLONG)CLI_PIPE_CONNECT_TIMEOUT_MS;
 
-  while (attempts < 5) {
+  if (!trying) {
+    SetLastError(ERROR_FILENAME_EXCED_RANGE); /* a truncated name would be another pipe */
+  }
+
+  /* Documented client pattern: retry while the single instance is busy or not yet
+   * re-created, with one overall deadline. */
+  while (trying) {
     handle = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (handle != INVALID_HANDLE_VALUE) {
-      break;
-    }
-
-    DWORD error = GetLastError();
-    if (error == ERROR_PIPE_BUSY) {
-      /* Instance exists but is serving another client: wait for it to free up. */
-      if (!WaitNamedPipeA(path, 1000)) {
-        break;
-      }
-    } else if (error == ERROR_FILE_NOT_FOUND) {
-      /* Server is between sessions and has not re-created the pipe yet. */
-      Sleep(200);
+      trying = false;
     } else {
-      break; /* access denied, bad name, ...: retrying cannot help */
-    }
+      DWORD error = GetLastError();
+      ULONGLONG now = GetTickCount64();
 
-    attempts++;
+      if (now >= deadline) {
+        trying = false;
+      } else if (error == ERROR_PIPE_BUSY) {
+        /* Serving another client: wait until the instance is free (or the deadline). */
+        (void)WaitNamedPipeA(path, (DWORD)(deadline - now));
+      } else if (error == ERROR_FILE_NOT_FOUND) {
+        /* Between sessions: the server re-creates the pipe right away. */
+        Sleep(50);
+      } else {
+        trying = false; /* access denied, bad name, ...: retrying cannot help */
+      }
+    }
   }
 
   if (handle != INVALID_HANDLE_VALUE) {
@@ -190,6 +216,16 @@ void cli_pipe_close(cli_pipe_ctx_struct_t *ctx) {
     ctx->h_write = NULL;
   }
 }
+
+void cli_named_pipe_disconnect(cli_pipe_ctx_struct_t *ctx) {
+  if (ctx->h_read != NULL) {
+    /* Documented server shutdown: let the client read everything still buffered (e.g. the
+     * goodbye text), then break the connection before the handle goes away. */
+    (void)FlushFileBuffers((HANDLE)ctx->h_write);
+    (void)DisconnectNamedPipe((HANDLE)ctx->h_read);
+    cli_pipe_close(ctx);
+  }
+}
 #else
 int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
   char in_path[FIFO_PATH_MAX];
@@ -217,20 +253,26 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
           rc = CLI_PIPE_OK;
         }
       }
-    } else if (in_created) {
-      unlink(in_path); /* only remove what this call created */
-    } else {
-      /* Pre-existing FIFO stays in place. */
     }
   }
 
   if (rc != CLI_PIPE_OK) {
+    int saved_errno = errno; /* the cause, for the caller; cleanup must not overwrite it */
+
     if (rfd >= 0) {
       close(rfd);
     }
     if (wfd >= 0) {
       close(wfd);
     }
+    /* Remove only what this call created; pre-existing FIFOs stay in place. */
+    if (in_created) {
+      unlink(in_path);
+    }
+    if (out_created) {
+      unlink(out_path);
+    }
+    errno = saved_errno;
   }
 
   return rc;
@@ -299,6 +341,26 @@ void cli_pipe_close(cli_pipe_ctx_struct_t *ctx) {
     ctx->write_fd = -1;
   }
 }
+
+void cli_named_pipe_disconnect(cli_pipe_ctx_struct_t *ctx) {
+  /* Closing our <name>.out end first lets the client read everything and then see EOF.
+   * The client closes its <name>.out reader before its <name>.in writer (cli_pipe_close()),
+   * so once <name>.in reports EOF the client holds neither FIFO any more: the next
+   * cli_named_pipe_listen() cannot be satisfied by this client's leftover reader. */
+  if (ctx->write_fd >= 0) {
+    close(ctx->write_fd);
+    ctx->write_fd = -1;
+  }
+  if (ctx->read_fd >= 0) {
+    uint8_t discard[64];
+    ssize_t n;
+
+    do {
+      n = read(ctx->read_fd, discard, sizeof(discard)); /* input after the session ended */
+    } while (n > 0 || (n < 0 && errno == EINTR));
+  }
+  cli_pipe_close(ctx);
+}
 #endif
 
 /*=======================================================================================
@@ -343,8 +405,12 @@ static bool build_win_pipe_path(char *buf, int32_t buflen, const char *name) {
 static bool build_fifo_paths(const char *name, char *in_path, char *out_path, size_t size) {
   int n_in = cli_snprintf(in_path, size, "%s.in", name);
   int n_out = cli_snprintf(out_path, size, "%s.out", name);
+  bool ok = (n_in >= 0 && (size_t)n_in < size && n_out >= 0 && (size_t)n_out < size);
 
-  return (n_in >= 0 && (size_t)n_in < size && n_out >= 0 && (size_t)n_out < size);
+  if (!ok) {
+    errno = ENAMETOOLONG; /* a truncated path would name a different FIFO */
+  }
+  return ok;
 }
 
 /**

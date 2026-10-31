@@ -18,10 +18,12 @@
 
 #if ENV_IS_UNIX_LIKE
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 #endif
@@ -106,7 +108,20 @@ int32_t cli_unix_listen(const char *path) {
 }
 
 int32_t cli_unix_accept(int32_t listen_fd) {
-  return accept(listen_fd, NULL, NULL);
+  int32_t fd = accept(listen_fd, NULL, NULL);
+
+  if (fd >= 0) {
+    struct timeval tv;
+    tv.tv_sec = CLI_UNIX_SEND_TIMEOUT_MS / 1000;
+    tv.tv_usec = (CLI_UNIX_SEND_TIMEOUT_MS % 1000) * 1000;
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#ifdef SO_NOSIGPIPE
+    int32_t nosig = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig));
+#endif
+  }
+
+  return fd;
 }
 
 int32_t cli_unix_connect(const char *path) {
@@ -165,12 +180,16 @@ void cli_unix_unlink(const char *path) {
  *
  * A leftover socket file from a crashed server is removed. Anything else is
  * left alone: a non-socket file (e.g. a mistyped path) is never deleted, and a
- * socket that still accepts connections belongs to a running server.
+ * socket that a server is still listening on is in use.
+ *
+ * The socket is probed with a non-blocking connect: only a refused connection
+ * (nobody listening) marks it stale. A full backlog (@c EAGAIN) means a busy
+ * server, and any other failure is reported rather than guessed at.
  *
  * @param[in] path  Socket path.
  *
  * @return @c true if @p path does not exist (any more); @c false with @c errno set
- *         (@c ENOTSOCK or @c EADDRINUSE) otherwise.
+ *         (@c ENOTSOCK, @c EADDRINUSE or the probe's error) otherwise.
  */
 static bool cli_unix_remove_stale(const char *path) {
   struct stat st;
@@ -181,13 +200,30 @@ static bool cli_unix_remove_stale(const char *path) {
       errno = ENOTSOCK;
       free_path = false;
     } else {
-      int32_t probe = cli_unix_connect(path);
+      struct sockaddr_un addr;
+      int32_t probe = socket(AF_UNIX, SOCK_STREAM, 0);
+
+      free_path = false;
       if (probe >= 0) {
+        int flags = fcntl(probe, F_GETFL, 0);
+        int rc = -1;
+
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        memcpy(addr.sun_path, path, strlen(path) + 1U);
+        if (flags >= 0 && fcntl(probe, F_SETFL, flags | O_NONBLOCK) == 0) {
+          rc = connect(probe, (struct sockaddr *)&addr, sizeof(addr));
+        }
+        int saved = errno;
         close(probe);
-        errno = EADDRINUSE;
-        free_path = false;
-      } else {
-        free_path = (unlink(path) == 0 || errno == ENOENT);
+
+        if (rc == 0 || saved == EAGAIN || saved == EINPROGRESS) {
+          errno = EADDRINUSE; /* a server is listening (possibly busy) */
+        } else if (saved == ECONNREFUSED) {
+          free_path = (unlink(path) == 0 || errno == ENOENT);
+        } else {
+          errno = saved;
+        }
       }
     }
   }
@@ -247,7 +283,8 @@ static cli_transport_ret_t cli_unix_socket_transport_read(void *raw) {
  * @brief Write a whole buffer to a connected UNIX socket.
  *
  * Retries partial writes and @c EINTR; a closed peer yields an error instead
- * of @c SIGPIPE.
+ * of @c SIGPIPE, and a send that blocks for @c CLI_UNIX_SEND_TIMEOUT_MS (client
+ * not reading) fails with @c EAGAIN, which ends the session.
  *
  * @param[in] raw  UNIX socket transport context.
  * @param[in] buf  Source buffer.

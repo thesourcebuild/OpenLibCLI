@@ -208,7 +208,10 @@ static uint32_t platform_micros(void *ctx) {
   LARGE_INTEGER cnt;
   QueryPerformanceFrequency(&freq);
   QueryPerformanceCounter(&cnt);
-  return (uint32_t)(cnt.QuadPart * 1000000ULL / freq.QuadPart);
+  /* Split into whole seconds and remainder so counts * 10^6 never overflow 64 bits. */
+  uint64_t c = (uint64_t)cnt.QuadPart;
+  uint64_t f = (uint64_t)freq.QuadPart;
+  return (uint32_t)((c / f) * 1000000ULL + ((c % f) * 1000000ULL) / f);
 #elif ENV_IS_UNIX_LIKE
   struct timeval tv;
   gettimeofday(&tv, NULL);

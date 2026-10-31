@@ -615,8 +615,7 @@ void cli_task(void *arg)
     cli_start(cli);
     while (1) {
         if (cli_session_engine(cli) != CLI_OK) {
-            cli_done(cli);
-            cli_start(cli); // restart the CLI engine
+            cli_start(cli); // begin a fresh session (cli_done() would discard the transport and commands)
         }
         // Other superloop work here ...
         cli_sleep_ms(1000);

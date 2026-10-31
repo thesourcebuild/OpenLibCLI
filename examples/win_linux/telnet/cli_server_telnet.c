@@ -15,6 +15,7 @@
  *=======================================================================================*/
 #include <cli_env_detect.h>
 #include "../../shared/cli_demo_setup.h"
+#include <utils/cli_args_parse.h>
 #include "cli_transport_telnet.h"
 #include "cli_server_telnet.h"
 
@@ -95,8 +96,10 @@ int main(int argc, char *argv[]) {
   uint16_t port = TELNET_SERVER_DEFAULT_PORT;
   int result = 0;
 
-  if (argc > 1) {
-    port = (uint16_t)strtol(argv[1], NULL, 10);
+  if (argc > 1 && (!parse_u16(argv[1], &port) || port == 0U)) {
+    /* 0 would bind a random ephemeral port; anything else invalid must not be guessed at. */
+    fprintf(stderr, "Invalid port '%s' (expected 1..65535)\n", argv[1]);
+    return 1;
   }
 
   int32_t listen_fd = cli_telnet_listen(port);
@@ -205,7 +208,10 @@ static uint32_t server_micros(void *ctx) {
   LARGE_INTEGER cnt;
   QueryPerformanceFrequency(&freq);
   QueryPerformanceCounter(&cnt);
-  return (uint32_t)(cnt.QuadPart * 1000000ULL / freq.QuadPart);
+  /* Split into whole seconds and remainder so counts * 10^6 never overflow 64 bits. */
+  uint64_t c = (uint64_t)cnt.QuadPart;
+  uint64_t f = (uint64_t)freq.QuadPart;
+  return (uint32_t)((c / f) * 1000000ULL + ((c % f) * 1000000ULL) / f);
 #else
   struct timeval tv;
   gettimeofday(&tv, NULL);

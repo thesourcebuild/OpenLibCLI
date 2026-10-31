@@ -87,8 +87,8 @@
 /** @brief MOTD banner for the pipe transport demo. */
 #define CLI_DEMO_BANNER_PIPE                                                                       \
   "************************************************************\r\n"                               \
-  "*            OpenLibCLI  --  Pipe Transport               *\r\n"                                \
-  "*         Pure-C, 100%% Static Allocation CLI Engine        *\r\n"                              \
+  "*            OpenLibCLI  --  Pipe Transport                *\r\n"                               \
+  "*         Pure-C, 100% Static Allocation CLI Engine        *\r\n"                               \
   "************************************************************"
 
 /*=======================================================================================
@@ -115,17 +115,11 @@ typedef HANDLE cli_thread_t;
 typedef pthread_t cli_thread_t;
 #endif
 
-/** @brief Shared state for the POSIX client relay threads. */
-typedef struct {
-  cli_pipe_ctx_struct_t *ctx; /**< Pipe context. */
-  volatile int32_t done;      /**< Set to 1 by reader when the pipe closes. */
-} relay_ctx_struct_t;
-
-/** @brief Context for the anonymous-pipe reader / server threads. */
+/** @brief Shared state for the POSIX relay threads (named-pipe client and anonymous demo). */
 typedef struct {
   cli_pipe_ctx_struct_t *ctx; /**< Client-side pipe context. */
-  volatile int32_t done;      /**< Set to 1 when the pipe closes. */
-} anon_ctx_struct_t;
+  volatile int32_t done;      /**< Set to 1 by reader when the pipe closes. */
+} relay_ctx_struct_t;
 
 /*=======================================================================================
  * External Data Variables
@@ -145,7 +139,7 @@ static demo_app_data_struct_t s_app;
  *=======================================================================================*/
 
 static void register_commands(cli_struct_t *cli);
-static void run_named_server(const char *name);
+static int run_named_server(const char *name);
 static void run_named_client(const char *name);
 static void run_anon_demo(void);
 static void print_usage(const char *prog);
@@ -164,11 +158,13 @@ static int8_t cli_server_loop(cli_struct_t *cli);
  * @param[in] argc Number of command-line arguments.
  * @param[in] argv Command-line arguments.
  *
- * @return @c 0 on normal flow, or @c 1 when an invalid mode is provided.
+ * @return @c 0 on normal flow, or @c 1 when an invalid mode is provided or the
+ *         named pipe cannot be created.
  */
 int main(int argc, char *argv[]) {
   const char *mode = (argc > 1) ? argv[1] : "named";
   const char *name = (argc > 2) ? argv[2] : PIPE_DEFAULT_NAME;
+  int status = 0;
 
 #if !ENV_IS_WINDOWS
   /* Writing to a FIFO whose reader went away must end the session, not kill the process. */
@@ -176,7 +172,7 @@ int main(int argc, char *argv[]) {
 #endif
 
   if (strcmp(mode, "named") == 0) {
-    run_named_server(name);
+    status = run_named_server(name);
   } else if (strcmp(mode, "client") == 0) {
     run_named_client(name);
   } else if (strcmp(mode, "anon") == 0) {
@@ -186,10 +182,10 @@ int main(int argc, char *argv[]) {
   } else {
     fprintf(stderr, "Unknown mode: %s\n\n", mode);
     print_usage(argv[0]);
-    return 1;
+    status = 1;
   }
 
-  return 0;
+  return status;
 }
 
 /*=======================================================================================
@@ -352,11 +348,15 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
  * @brief Listen on a named pipe and serve one client session at a time.
  *
  * Loops indefinitely, accepting one client per iteration via
- * @c cli_named_pipe_listen().
+ * @c cli_named_pipe_listen() and ending each session with
+ * @c cli_named_pipe_disconnect(), which waits until that client has gone so the
+ * next listen cannot pick up its leftover pipe ends.
  *
  * @param[in] name  Logical pipe name / base path.
+ *
+ * @return 1 if the pipe cannot be created or opened (does not return otherwise).
  */
-static void run_named_server(const char *name) {
+static int run_named_server(const char *name) {
 #if ENV_IS_WINDOWS
   printf("Named pipe server ready.\n");
   printf("  Pipe path : \\\\.\\pipe\\%s\n", name);
@@ -369,8 +369,9 @@ static void run_named_server(const char *name) {
   printf("  %s client %s\n\n", "cli_server_pipe", name);
 
   uint32_t session_num = 0;
+  bool listening = true;
 
-  for (;;) {
+  while (listening) {
     printf("Waiting for client connection ...\n");
     fflush(stdout);
 
@@ -378,7 +379,14 @@ static void run_named_server(const char *name) {
     cli_transport_struct_t transport;
 
     if (cli_named_pipe_listen(name, &pipe_ctx) < 0) {
-      fprintf(stderr, "cli_named_pipe_listen failed\n");
+      /* Creating / opening the pipe failed (bad path, permissions, ...): retrying the
+       * same call cannot succeed. */
+#if ENV_IS_WINDOWS
+      fprintf(stderr, "cli_named_pipe_listen failed (error %lu)\n", GetLastError());
+#else
+      perror("cli_named_pipe_listen");
+#endif
+      listening = false;
     } else {
       printf("Client connected (session %d)\n", ++session_num);
 
@@ -390,9 +398,11 @@ static void run_named_server(const char *name) {
       printf("Session %d ended (rc=%d)\n", session_num, rc);
 
       cli_done(&demo_cli);
-      cli_pipe_close(&pipe_ctx);
+      cli_named_pipe_disconnect(&pipe_ctx);
     }
   }
+
+  return 1;
 }
 
 /*---------------------------------------------------------------------------------------
@@ -428,6 +438,7 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
 
   uint8_t pipe_buf[512];
   int32_t running = 1;
+  bool input_open = true; /* redirected stdin not yet at end of file */
 
   while (running) {
     /* Drain server â†’ client */
@@ -458,7 +469,9 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
         continue;
       }
       INPUT_RECORD rec;
-      ReadConsoleInputA(h_stdin, &rec, 1, &n_events);
+      if (!ReadConsoleInputA(h_stdin, &rec, 1, &n_events) || n_events == 0) {
+        continue; /* rec was not filled in */
+      }
       if (rec.EventType != KEY_EVENT || !rec.Event.KeyEvent.bKeyDown) {
         continue;
       }
@@ -514,10 +527,15 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
           running = 0;
         }
       }
+    } else if (!input_open) {
+      /* Input exhausted: keep showing the server's replies until it closes the session
+       * (like the POSIX client, whose reader thread keeps draining). */
+      cli_sleep_ms(10U);
     } else {
       char filter_line_buf[512];
       if (!fgets(filter_line_buf, (int32_t)sizeof(filter_line_buf), stdin)) {
-        break;
+        input_open = false;
+        continue;
       }
       DWORD n = 0;
       if (!WriteFile(h_write, filter_line_buf, (DWORD)strlen(filter_line_buf), &n, NULL)) {
@@ -671,27 +689,6 @@ static void run_named_client(const char *name) {
  * "client" feeding stdin into the CLI.  No external tools required.
  *---------------------------------------------------------------------------------------*/
 
-#if !ENV_IS_WINDOWS
-/**
- * @brief Reader thread: drains the client pipe to stdout.
- *
- * @param[in] arg  @c anon_ctx_struct_t pointer.
- *
- * @return Platform thread return value.
- */
-static PFT_THREAD_FN anon_reader_fn(PFT_THREAD_ARG arg) {
-  anon_ctx_struct_t *a = (anon_ctx_struct_t *)arg;
-  uint8_t buf[512];
-  int32_t n;
-  while ((n = cli_pipe_read(a->ctx, buf, sizeof(buf))) > 0) {
-    fwrite(buf, 1, (size_t)n, stdout);
-    fflush(stdout);
-  }
-  a->done = 1;
-  return PFT_THREAD_RET;
-}
-#endif /* !ENV_IS_WINDOWS */
-
 /**
  * @brief Server thread: runs the CLI engine on the server-side pipe.
  *
@@ -752,14 +749,14 @@ static void run_anon_demo(void) {
       cli_thread_join(srv_t);
     }
 #else
-    anon_ctx_struct_t actx = {&clt, 0};
+    relay_ctx_struct_t actx = {&clt, 0};
     cli_thread_t reader_t;
     cli_thread_t writer_t;
     bool reader_ok;
     bool writer_ok;
 
     pipe_raw_mode();
-    reader_ok = cli_thread_start(&reader_t, anon_reader_fn, &actx);
+    reader_ok = cli_thread_start(&reader_t, relay_reader_fn, &actx);
     writer_ok = reader_ok && cli_thread_start(&writer_t, relay_writer_fn, &actx);
     if (!writer_ok) {
       perror("pthread_create");

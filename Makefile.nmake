@@ -77,13 +77,13 @@ LINK = link.exe
 # /WX          warnings as errors
 # /std:c11     C11 standard
 # /O2          optimise for speed
-# /Zi          debug info (PDB)
-CFLAGS = /nologo /W4 /WX /std:c11 /O2 /Zi /FS /MT /Gy \
-         /I$(INC_DIR) \
-         /D_CRT_SECURE_NO_WARNINGS \
-         /DWIN32 /D_WIN32 \
-         /Fd$(LIB_DIR)\vc.pdb
-SHARED_CFLAGS  = $(CFLAGS) /DCLI_SHARED /DBUILD_LIB_SHARED /Fd$(LIB_DIR)\openlibcli_dll.pdb
+# /Zi          debug info (PDB); each flag set below names its own PDB with /Fd
+BASE_CFLAGS = /nologo /W4 /WX /std:c11 /O2 /Zi /FS /MT /Gy \
+              /I$(INC_DIR) \
+              /D_CRT_SECURE_NO_WARNINGS \
+              /DWIN32 /D_WIN32
+CFLAGS         = $(BASE_CFLAGS) /Fd$(LIB_DIR)\vc.pdb
+SHARED_CFLAGS  = $(BASE_CFLAGS) /DCLI_SHARED /DBUILD_LIB_SHARED /Fd$(LIB_DIR)\openlibcli_dll.pdb
 EXAMPLE_CFLAGS = $(CFLAGS) /DCLI_SHARED
 
 ARFLAGS  = /nologo
@@ -229,7 +229,11 @@ $(STATIC_LIB): $(LIB_OBJS)
 !IF "$(BUILD_LIB_SHARED)" == "1"
 shared: _dirs $(SHARED_DLL)
 
-$(SHARED_DLL): $(SHARED_SRCS) $(INC_DIR)\cli.h $(INC_DIR)\utils\cli_args_parse.h $(INC_DIR)\config\cli_config.h
+# The import library $(SHARED_IMPLIB) is written by this link step and has no rule of its
+# own, so targets that link it must depend on $(SHARED_DLL): otherwise NMake treats the
+# existing .lib as an up-to-date source and keeps linking a stale library.
+$(SHARED_DLL): $(SHARED_SRCS) $(INC_DIR)\cli.h $(INC_DIR)\cli_env_detect.h \
+               $(INC_DIR)\utils\cli_args_parse.h $(INC_DIR)\config\cli_config.h
     $(CC) $(SHARED_CFLAGS) /LD /Fo$(OBJ_SHARED_DIR)\ \
         $(SHARED_SRCS) \
         /link $(LDFLAGS) /OUT:$@ /IMPLIB:$(SHARED_IMPLIB) $(PLAT_LIBS)
@@ -270,7 +274,7 @@ $(TELNET_BIN): $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.c \
                $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
                $(INC_DIR)\cli.h \
                $(INC_DIR)\config\cli_config.h \
-               $(DEMO_OBJ) $(LIB_OUT)
+               $(DEMO_OBJ) $(SHARED_DLL)
     $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.c \
         $(EXAMPLE_DIR)\win_linux\telnet\cli_transport_telnet.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_telnet.map \
@@ -294,7 +298,7 @@ $(SERIAL_BIN): $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.c \
                $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
                $(INC_DIR)\cli.h \
                $(INC_DIR)\config\cli_config.h \
-               $(DEMO_OBJ) $(LIB_OUT)
+               $(DEMO_OBJ) $(SHARED_DLL)
     $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.c \
         $(EXAMPLE_DIR)\win_linux\serial\cli_transport_serial.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_serial.map \
@@ -318,7 +322,7 @@ $(TCP_BIN): $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.c \
             $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
             $(INC_DIR)\cli.h \
             $(INC_DIR)\config\cli_config.h \
-            $(DEMO_OBJ) $(LIB_OUT)
+            $(DEMO_OBJ) $(SHARED_DLL)
     $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.c \
         $(EXAMPLE_DIR)\win_linux\tcp\cli_transport_tcp.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_tcp.map \
@@ -341,7 +345,7 @@ $(PIPE_BIN): $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
              $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
              $(INC_DIR)\cli.h \
              $(INC_DIR)\config\cli_config.h \
-             $(DEMO_OBJ) $(LIB_OUT)
+             $(DEMO_OBJ) $(SHARED_DLL)
     $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
         $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_pipe.map \

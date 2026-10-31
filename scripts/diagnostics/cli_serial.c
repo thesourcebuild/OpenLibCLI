@@ -73,7 +73,7 @@ void cli_serial_setup(const cli_transport_struct_t *transport,
   s_app.rx_packets = 12345;
   s_app.tx_packets = 11000;
   cli_set_userdata(&s_cli, &s_app);
-  cli_set_banner(&s_cli, "OpenLibCLI AVR CLI");
+  cli_set_banner(&s_cli, "OpenLibCLI AVR"); /* fits CLI_MAX_BANNER_LEN (16) on AVR */
   cli_set_enable_secret(&s_cli, "cisco");
 #if CLI_ENABLE_MODE_NAMES
   cli_set_mode_name(&s_cli, CLI_MODE_CONFIG, "config");

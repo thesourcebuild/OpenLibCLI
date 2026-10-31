@@ -279,6 +279,15 @@ static int8_t cmd_warn(cli_struct_t *cli, const char *cmd, cli_argc_t argc, cons
   return CLI_OK;
 }
 
+static int8_t cmd_relogin(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                          const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  cli_request_auth(cli); /* empties the line editor while this line is still executing */
+  cli_println(cli, "ARG0:%s", argv[0]);
+  return CLI_OK;
+}
+
 static cli_cmd_handle_t s_h_show;
 static cli_cmd_handle_t s_h_calc;
 static cli_cmd_handle_t s_h_secret;
@@ -318,6 +327,8 @@ static void register_test_commands(void) {
   (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "longline", cmd_longline, CLI_PRIV_USER,
                         CLI_MODE_ANY, "");
   (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "warn", cmd_warn, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "relogin", cmd_relogin, CLI_PRIV_USER, CLI_MODE_ANY,
+                        "");
 }
 
 /** Create a fresh session (same pool every time, like the example servers). */
@@ -939,9 +950,11 @@ static void test_enable_attempt_limit(void) {
   cli_set_auth_failure_mode(&s_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
   cli_set_auth_lockout_duration(&s_cli, 30U);
   session_start();
-  type("enable\rx\renable\rx\renable\rx\r");
+  /* "show version" arrives in the same burst that starts the lockout: discarded too. */
+  type("enable\rx\renable\rx\renable\rx\rshow version\r");
   ASSERT_OUT("Lock-Out Session");
   ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  ASSERT_EQ(s_in_pos, s_in_len);
   type("show version\r");
   s_now += 31U;
   out_clear();
@@ -1266,6 +1279,197 @@ static void test_write_error_ends_session(void) {
   TEST_END();
 }
 
+/*=======================================================================================
+ * Round 3
+ *=======================================================================================*/
+
+static void test_restart_keeps_line_ending(void) {
+  TEST_START("restart_keeps_line_ending");
+  session_new();
+  cli_set_quit_policy(&s_cli, CLI_QUIT_POLICY_RESET_SESSION);
+  session_start();
+
+  /* The LF of "quit\r\n" belongs to the same line: exactly one prompt follows. */
+  ASSERT_EQ(type("quit\r\n"), CLI_OK);
+  ASSERT_EQ(out_count("rtr> "), 1);
+  TEST_END();
+}
+
+static void test_help_after_arguments(void) {
+  TEST_START("help_after_arguments");
+  session_new();
+  session_start();
+
+  /* Words after a command without subcommands are arguments, not unknown commands. */
+  ASSERT_EQ(type("echo 1 ?"), CLI_OK);
+  ASSERT_OUT("<cr>");
+  ASSERT_NOT_OUT("Unknown");
+  out_clear();
+  ASSERT_EQ(type("\x15"
+                 "echo 1 x\t"),
+            CLI_OK);
+  ASSERT_OUT("\a");
+  TEST_END();
+}
+
+static void test_submenu_offers_root_commands(void) {
+  TEST_START("submenu_offers_root_commands");
+  session_new();
+  session_start();
+
+  ASSERT_EQ(type("calc\r"), CLI_OK);
+  ASSERT_TRUE(s_cli.context == s_h_calc);
+  out_clear();
+
+  /* 'ec' matches nothing in the submenu; execution would run the root 'echo'. */
+  ASSERT_EQ(type("ec\t"), CLI_OK);
+  ASSERT_OUT("echo ");
+  out_clear();
+  ASSERT_EQ(type("\x15?"), CLI_OK);
+  ASSERT_OUT("arith");
+  ASSERT_OUT("echo");
+  out_clear();
+  ASSERT_EQ(type("\x15help\r"), CLI_OK);
+  ASSERT_OUT("arith");
+  ASSERT_OUT("echo");
+  out_clear();
+  ASSERT_EQ(type("help echo\r"), CLI_OK);
+  ASSERT_NOT_OUT("Unknown");
+  TEST_END();
+}
+
+static void test_start_begins_fresh_session(void) {
+  TEST_START("start_begins_fresh_session");
+  session_new();
+  session_start();
+
+  ASSERT_EQ(type("enable\r"), CLI_OK);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  ASSERT_EQ(type("quit\r"), CLI_ERR_QUIT);
+
+  /* A new session on the same struct starts unprivileged with empty history. */
+  cli_start(&s_cli);
+  ASSERT_EQ(run(), CLI_OK);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_EXEC);
+  ASSERT_EQ(s_cli.history_count, 0);
+
+  /* A write failure of the previous peer does not end the next session. */
+  s_write_fails = true;
+  ASSERT_EQ(type("help\r"), CLI_ERR);
+  s_write_fails = false;
+  cli_start(&s_cli);
+  ASSERT_EQ(run(), CLI_OK);
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_RUN);
+  TEST_END();
+}
+
+static void test_set_mode_restores_privilege(void) {
+  TEST_START("set_mode_restores_privilege");
+  session_new();
+  session_start();
+
+  ASSERT_EQ(cli_set_mode(&s_cli, CLI_MODE_ANY), CLI_ERR);
+  ASSERT_EQ(type("enable\r"), CLI_OK);
+  ASSERT_EQ(type("configure\r"), CLI_OK);
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_CONFIG);
+
+  /* Returning to exec mode leaves the level 'enable' entered, with its privilege. */
+  ASSERT_EQ(cli_set_mode(&s_cli, CLI_MODE_EXEC), CLI_OK);
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_EXEC);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  ASSERT_EQ(s_cli.nav_depth, 0);
+  TEST_END();
+}
+
+static void test_rx_budget_per_tick(void) {
+  TEST_START("rx_budget_per_tick");
+  session_new();
+  session_start();
+
+  for (size_t i = 0; i < (size_t)CLI_MAX_RX_BYTES_PER_TICK + 100U; i++) {
+    s_in[s_in_len++] = 'a';
+  }
+  ASSERT_EQ(cli_session_engine(&s_cli), CLI_OK);
+  ASSERT_EQ(s_in_pos, (size_t)CLI_MAX_RX_BYTES_PER_TICK);
+  ASSERT_EQ(cli_session_engine(&s_cli), CLI_OK);
+  ASSERT_EQ(s_in_pos, s_in_len);
+  TEST_END();
+}
+
+static void test_no_commands_after_write_error(void) {
+  TEST_START("no_commands_after_write_error");
+  session_new();
+  session_start();
+
+  s_write_fails = true;
+  ASSERT_EQ(type("showall\rshowall\r"), CLI_ERR);
+  ASSERT_EQ(s_cb_count, 0);
+  TEST_END();
+}
+
+static void test_auth_prompt_keeps_running_args(void) {
+  TEST_START("auth_prompt_keeps_running_args");
+  session_new();
+  session_start();
+
+  ASSERT_EQ(type("relogin\r"), CLI_OK);
+  ASSERT_OUT("ARG0:relogin");
+  ASSERT_OUT("Username: ");
+  ASSERT_EQ(s_cli.input_len, 0);
+  ASSERT_EQ(s_cli.input[0], '\0');
+
+  /* The same through cli_exec() from outside a command, with a half-typed line. */
+  session_new();
+  session_start();
+  ASSERT_EQ(type("ech"), CLI_OK);
+  ASSERT_EQ(cli_exec(&s_cli, "relogin"), CLI_OK);
+  ASSERT_OUT("ARG0:relogin");
+  ASSERT_EQ(s_cli.input_len, 0);
+  ASSERT_EQ(s_cli.input[0], '\0');
+  TEST_END();
+}
+
+static void test_idle_untouched_session_not_reset(void) {
+  TEST_START("idle_untouched_session_not_reset");
+
+  /* Waiting at the first login prompt: nothing to reset. */
+  session_new();
+  cli_require_authorization(&s_cli, true);
+  cli_set_idle_timeout(&s_cli, 5U);
+  session_start();
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  s_now += 100U;
+  (void)run();
+  ASSERT_NOT_OUT("Idle timeout");
+
+  /* Once something was typed, the reset applies (half-typed credentials are dropped). */
+  type("adm");
+  s_now += 6U;
+  (void)run();
+  ASSERT_EQ(out_count("Idle timeout. Session restarted."), 1);
+
+  /* The LF of a CR LF that restarted the session is not new activity. */
+  session_new();
+  cli_set_quit_policy(&s_cli, CLI_QUIT_POLICY_RESET_SESSION);
+  cli_set_idle_timeout(&s_cli, 5U);
+  session_start();
+  type("quit\r\n");
+  s_now += 100U;
+  (void)run();
+  ASSERT_NOT_OUT("Idle timeout");
+
+  /* Closing still counts from the start: an unused connection is closed. */
+  session_new();
+  cli_set_idle_timeout(&s_cli, 5U);
+  cli_set_idle_timeout_mode(&s_cli, CLI_IDLE_TIMEOUT_POLICY_CLOSE);
+  session_start();
+  s_now += 6U;
+  ASSERT_EQ(run(), CLI_ERR_QUIT);
+  ASSERT_OUT("Idle timeout.");
+  TEST_END();
+}
+
 static void test_null_safety(void) {
   TEST_START("null_safety");
   session_new();
@@ -1348,6 +1552,17 @@ int main(void) {
   RUN_SUITE(test_help_and_completion_ui);
   RUN_SUITE(test_remove_relocates_descendants);
   RUN_SUITE(test_engine_rejects_bad_transport);
+
+  printf("\n--- round 3 ---\n");
+  RUN_SUITE(test_restart_keeps_line_ending);
+  RUN_SUITE(test_help_after_arguments);
+  RUN_SUITE(test_submenu_offers_root_commands);
+  RUN_SUITE(test_start_begins_fresh_session);
+  RUN_SUITE(test_set_mode_restores_privilege);
+  RUN_SUITE(test_rx_budget_per_tick);
+  RUN_SUITE(test_no_commands_after_write_error);
+  RUN_SUITE(test_auth_prompt_keeps_running_args);
+  RUN_SUITE(test_idle_untouched_session_not_reset);
 
   printf("\n--- robustness ---\n");
   RUN_SUITE(test_write_error_ends_session);

@@ -25,6 +25,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <float.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -411,6 +413,13 @@ static void test_parse_f64(void) {
   ASSERT_DBL_NEAR(v, 1.0, 1e-15);
   ASSERT_FALSE(parse_f64("1e309", &v));
   ASSERT_FALSE(parse_f64("1e999999999", &v));
+  /* Products that round up to infinity in the last scaling step are overflow too */
+  ASSERT_FALSE(parse_f64("1.7976931348623158e308", &v));
+  ASSERT_FALSE(parse_f64("-1.797693134862316e308", &v));
+  ASSERT_TRUE(parse_f64("1.7976931348623157e308", &v));
+  ASSERT_TRUE(isfinite(v));
+  ASSERT_FALSE(parse_f64("inf", &v));
+  ASSERT_FALSE(parse_f64("nan", &v));
   ASSERT_TRUE(parse_f64("0e999999999", &v));
   ASSERT_DBL_NEAR(v, 0.0, 1e-15);
   /* Digits beyond the mantissa round the last kept digit */
@@ -447,6 +456,14 @@ static void test_parse_f32(void) {
   ASSERT_FLT_NEAR(v, 0.0f, 1e-7f);
   ASSERT_TRUE(parse_f32("-0", &v));
   ASSERT_FLT_NEAR(v, 0.0f, 1e-7f);
+
+  /* Input that rounds to FLT_MAX is valid; from FLT_MAX + half a float ulp it overflows */
+  ASSERT_TRUE(parse_f32("3.4028235e38", &v));
+  ASSERT_TRUE(v == FLT_MAX);
+  ASSERT_TRUE(parse_f32("-3.4028235e38", &v));
+  ASSERT_TRUE(v == -FLT_MAX);
+  ASSERT_FALSE(parse_f32("3.4028236e38", &v));
+  ASSERT_FALSE(parse_f32("1e39", &v));
 
   ASSERT_FALSE(parse_f32("", &v));
   ASSERT_FALSE(parse_f32("abc", &v));
@@ -619,6 +636,9 @@ static void test_strtol_parse_float(void) {
   ASSERT_TRUE(v >= 0.0f && v < 1e-37f);
   ASSERT_FALSE(strtol_parse_float("1e40", &v));
   ASSERT_FALSE(strtol_parse_float("-1e40", &v));
+  ASSERT_FALSE(strtol_parse_float("inf", &v));
+  ASSERT_FALSE(strtol_parse_float("-infinity", &v));
+  ASSERT_FALSE(strtol_parse_float("nan", &v));
 
   ASSERT_FALSE(strtol_parse_float("", &v));
   ASSERT_FALSE(strtol_parse_float("abc", &v));
@@ -641,6 +661,9 @@ static void test_strtol_parse_double(void) {
   ASSERT_TRUE(strtol_parse_double("1e-320", &v));
   ASSERT_TRUE(v >= 0.0 && v < 1e-300);
   ASSERT_FALSE(strtol_parse_double("1e400", &v));
+  ASSERT_FALSE(strtol_parse_double("inf", &v));
+  ASSERT_FALSE(strtol_parse_double("nan", &v));
+  ASSERT_FALSE(strtol_parse_double("nan(1)", &v));
 
   ASSERT_FALSE(strtol_parse_double("", &v));
   ASSERT_FALSE(strtol_parse_double("  ", &v));
