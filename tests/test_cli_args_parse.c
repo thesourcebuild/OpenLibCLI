@@ -188,11 +188,10 @@ static void test_parse_i64(void) {
   ASSERT_FALSE(parse_i64("-9223372036854775809", &v));
   ASSERT_FALSE(parse_i64(NULL, &v));
   ASSERT_FALSE(parse_i64(" 1", &v));
-  /* Sign-only: sign consumed, empty remainder succeeds with value 0 */
-  ASSERT_TRUE(parse_i64("+", &v));
-  ASSERT_EQ(v, 0);
-  ASSERT_TRUE(parse_i64("-", &v));
-  ASSERT_EQ(v, 0);
+  /* Sign-only input is not a number */
+  ASSERT_FALSE(parse_i64("+", &v));
+  ASSERT_FALSE(parse_i64("-", &v));
+  ASSERT_FALSE(parse_i64("-a", &v));
   TEST_END();
 }
 
@@ -228,11 +227,9 @@ static void test_parse_i32(void) {
 
   ASSERT_FALSE(parse_i32("2147483648", &v));
   ASSERT_FALSE(parse_i32("-2147483649", &v));
-  /* Sign-only: parse_i32 delegates to parse_i64 which accepts sign-only as 0 */
-  ASSERT_TRUE(parse_i32("+", &v));
-  ASSERT_EQ(v, 0);
-  ASSERT_TRUE(parse_i32("-", &v));
-  ASSERT_EQ(v, 0);
+  /* Sign-only input is not a number */
+  ASSERT_FALSE(parse_i32("+", &v));
+  ASSERT_FALSE(parse_i32("-", &v));
   ASSERT_FALSE(parse_i32("", &v));
   TEST_END();
 }
@@ -397,7 +394,34 @@ static void test_parse_f64(void) {
   ASSERT_TRUE(parse_f64("1e-400", &v));
   ASSERT_DBL_NEAR(v, 0.0, 1e-15);
 
+  /* More digits than fit in 64 bits: no silent wraparound, value kept */
+  ASSERT_TRUE(parse_f64("23058430092136939520", &v));
+  ASSERT_DBL_NEAR(v / 23058430092136939520.0, 1.0, 1e-15);
+  ASSERT_TRUE(parse_f64("100000000000000000000000000", &v));
+  ASSERT_DBL_NEAR(v / 1e26, 1.0, 1e-15);
+  ASSERT_TRUE(parse_f64("0.12345678901234567890123", &v));
+  ASSERT_DBL_NEAR(v, 0.12345678901234567890123, 1e-16);
+  ASSERT_TRUE(parse_f64("3.14159265358979323846264338327950288", &v));
+  ASSERT_DBL_NEAR(v, 3.14159265358979323846, 1e-15);
+  ASSERT_TRUE(parse_f64("1.5e308", &v));
+  ASSERT_DBL_NEAR(v / 1.5e308, 1.0, 1e-14);
+  ASSERT_TRUE(parse_f64("2.5e-300", &v));
+  ASSERT_DBL_NEAR(v / 2.5e-300, 1.0, 1e-14);
+  ASSERT_TRUE(parse_f64("0.000000000000000000000000000001e30", &v));
+  ASSERT_DBL_NEAR(v, 1.0, 1e-15);
+  ASSERT_FALSE(parse_f64("1e309", &v));
+  ASSERT_FALSE(parse_f64("1e999999999", &v));
+  ASSERT_TRUE(parse_f64("0e999999999", &v));
+  ASSERT_DBL_NEAR(v, 0.0, 1e-15);
+  /* Digits beyond the mantissa round the last kept digit */
+  ASSERT_TRUE(parse_f64("0.99999999999999999999999", &v));
+  ASSERT_DBL_NEAR(v, 1.0, 1e-16);
+  ASSERT_TRUE(parse_f64("18446744073709551615999", &v));
+  ASSERT_DBL_NEAR(v / 1.8446744073709551615999e22, 1.0, 1e-15);
+
   ASSERT_FALSE(parse_f64("", &v));
+  ASSERT_FALSE(parse_f64(".", &v));
+  ASSERT_FALSE(parse_f64("-.", &v));
   ASSERT_FALSE(parse_f64("e10", &v));
   ASSERT_FALSE(parse_f64("-", &v));
   ASSERT_FALSE(parse_f64("+", &v));
@@ -457,9 +481,10 @@ static void test_strtol_parse_u64(void) {
   ASSERT_FALSE(strtol_parse_u64("-", &v));
   ASSERT_FALSE(strtol_parse_u64("0xGG", &v));
   ASSERT_FALSE(strtol_parse_u64("0x", &v));
-  /* strtoull("-1") wraps to UINT64_MAX — not rejected */
-  ASSERT_TRUE(strtol_parse_u64("-1", &v));
-  ASSERT_EQ(v, 18446744073709551615ULL);
+  /* strtoull("-1") would wrap to UINT64_MAX — negative input is rejected */
+  ASSERT_FALSE(strtol_parse_u64("-1", &v));
+  ASSERT_FALSE(strtol_parse_u64("  -1", &v));
+  ASSERT_FALSE(strtol_parse_u64("-0", &v));
   TEST_END();
 }
 
@@ -498,9 +523,11 @@ static void test_strtol_parse_u32(void) {
   ASSERT_FALSE(strtol_parse_u32("+", &v));
   ASSERT_FALSE(strtol_parse_u32("-", &v));
   ASSERT_FALSE(strtol_parse_u32("0xGG", &v));
-  /* strtoul("-1") wraps to ULONG_MAX — not rejected */
-  ASSERT_TRUE(strtol_parse_u32("-1", &v));
-  ASSERT_EQ(v, 4294967295U);
+  /* Negative input is rejected on every platform (strtoul would wrap it) */
+  ASSERT_FALSE(strtol_parse_u32("-1", &v));
+  ASSERT_FALSE(strtol_parse_u32("\t-5", &v));
+  ASSERT_FALSE(strtol_parse_u16("-1", &(uint16_t){0}));
+  ASSERT_FALSE(strtol_parse_u8("-1", &(uint8_t){0}));
   TEST_END();
 }
 
@@ -587,6 +614,12 @@ static void test_strtol_parse_float(void) {
   ASSERT_TRUE(strtol_parse_float("0", &v));
   ASSERT_FLT_NEAR(v, 0.0f, 1e-7f);
 
+  /* Underflow is accepted (0 or subnormal), overflow is rejected */
+  ASSERT_TRUE(strtol_parse_float("1e-40", &v));
+  ASSERT_TRUE(v >= 0.0f && v < 1e-37f);
+  ASSERT_FALSE(strtol_parse_float("1e40", &v));
+  ASSERT_FALSE(strtol_parse_float("-1e40", &v));
+
   ASSERT_FALSE(strtol_parse_float("", &v));
   ASSERT_FALSE(strtol_parse_float("abc", &v));
   ASSERT_FALSE(strtol_parse_float("  ", &v));
@@ -604,6 +637,10 @@ static void test_strtol_parse_double(void) {
   ASSERT_DBL_NEAR(v, 0.015, 1e-12);
   ASSERT_TRUE(strtol_parse_double("0", &v));
   ASSERT_DBL_NEAR(v, 0.0, 1e-12);
+
+  ASSERT_TRUE(strtol_parse_double("1e-320", &v));
+  ASSERT_TRUE(v >= 0.0 && v < 1e-300);
+  ASSERT_FALSE(strtol_parse_double("1e400", &v));
 
   ASSERT_FALSE(strtol_parse_double("", &v));
   ASSERT_FALSE(strtol_parse_double("  ", &v));
@@ -629,8 +666,13 @@ static void test_format_u64(void) {
   ASSERT_STR_EQ(buf, "42");
   ASSERT_EQ(format_u64(buf, sizeof(buf), 18446744073709551615ULL), 20);
   ASSERT_STR_EQ(buf, "18446744073709551615");
-  ASSERT_EQ(format_u64(buf, 4, 12345), 3);
-  ASSERT_STR_EQ(buf, "123");
+  /* All or nothing: a truncated number would read as a different value */
+  ASSERT_EQ(format_u64(buf, 4, 12345), 0);
+  ASSERT_STR_EQ(buf, "");
+  ASSERT_EQ(format_u64(buf, 6, 12345), 5);
+  ASSERT_STR_EQ(buf, "12345");
+  ASSERT_EQ(format_u64(buf, 5, 12345), 0);
+  ASSERT_STR_EQ(buf, "");
   ASSERT_EQ(format_u64(buf, 1, 999), 0);
   ASSERT_STR_EQ(buf, "");
   ASSERT_EQ(format_u64(buf, 2, 5), 1);
@@ -650,10 +692,12 @@ static void test_format_i64(void) {
   ASSERT_STR_EQ(buf, "123");
   ASSERT_EQ(format_i64(buf, sizeof(buf), -9223372036854775807LL - 1), 20);
   ASSERT_STR_EQ(buf, "-9223372036854775808");
-  ASSERT_EQ(format_i64(buf, 3, -10), 2);
-  ASSERT_STR_EQ(buf, "-1");
-  ASSERT_EQ(format_i64(buf, 4, -100), 3);
+  ASSERT_EQ(format_i64(buf, 3, -10), 0);
+  ASSERT_STR_EQ(buf, "");
+  ASSERT_EQ(format_i64(buf, 4, -10), 3);
   ASSERT_STR_EQ(buf, "-10");
+  ASSERT_EQ(format_i64(buf, 4, -100), 0);
+  ASSERT_STR_EQ(buf, "");
   ASSERT_EQ(format_i64(buf, 1, 0), 0);
   ASSERT_STR_EQ(buf, "");
   TEST_END();
@@ -669,8 +713,12 @@ static void test_format_hex64(void) {
   ASSERT_STR_EQ(buf, "0xFF");
   ASSERT_EQ(format_hex64(buf, sizeof(buf), 0xDEADBEEF), 10);
   ASSERT_STR_EQ(buf, "0xDEADBEEF");
-  ASSERT_EQ(format_hex64(buf, 3, 255), 2);
-  ASSERT_STR_EQ(buf, "0x");
+  ASSERT_EQ(format_hex64(buf, 3, 255), 0);
+  ASSERT_STR_EQ(buf, "");
+  ASSERT_EQ(format_hex64(buf, 4, 255), 0);
+  ASSERT_STR_EQ(buf, "");
+  ASSERT_EQ(format_hex64(buf, 5, 255), 4);
+  ASSERT_STR_EQ(buf, "0xFF");
   ASSERT_EQ(format_hex64(buf, 1, 255), 0);
   ASSERT_STR_EQ(buf, "");
   ASSERT_EQ(format_hex64(buf, sizeof(buf), 0xFFFFFFFFFFFFFFFFULL), 18);
@@ -811,6 +859,14 @@ static void test_format_bytes(void) {
 
   ASSERT_EQ(format_bytes(buf, sizeof(buf), single, 1), 2);
   ASSERT_STR_EQ(buf, "A5");
+
+  /* Exactly enough room for one byte + NUL */
+  ASSERT_EQ(format_bytes(buf, 3, single, 1), 2);
+  ASSERT_STR_EQ(buf, "A5");
+  ASSERT_EQ(format_bytes(buf, 2, single, 1), 0);
+  ASSERT_STR_EQ(buf, "");
+  ASSERT_EQ(format_bytes(buf, 9, data, 4), 8);
+  ASSERT_STR_EQ(buf, "DE AD BE");
 
   ASSERT_EQ(format_bytes(buf, sizeof(buf), NULL, 0), 0);
   ASSERT_STR_EQ(buf, "");

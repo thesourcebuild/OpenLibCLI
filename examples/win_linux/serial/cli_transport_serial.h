@@ -96,10 +96,11 @@ void cli_fd_init(cli_fd_ctx_struct_t *ctx, cli_transport_struct_t *transport, in
                  int32_t write_fd);
 
 /**
- * @brief Release a POSIX fd transport context back to the static pool.
+ * @brief Detach a POSIX fd transport.
  *
- * Call after @c cli_done() to free the pool slot for reuse by a future
- * @c cli_fd_init() call. Zeroes all function pointers in @p transport.
+ * Call after @c cli_done(). Marks the descriptors in the context as closed
+ * (@c -1, the descriptors themselves are not closed) and zeroes all function
+ * pointers in @p transport.
  *
  * @param[in] transport  Transport previously filled by @c cli_fd_init();
  *                       @c NULL or an already released transport is a no-op.

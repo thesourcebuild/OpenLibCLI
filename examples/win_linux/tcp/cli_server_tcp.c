@@ -112,6 +112,7 @@ int main(int argc, char *argv[]) {
     int32_t client_fd = cli_tcp_accept(listen_fd);
     if (client_fd < 0) {
       fprintf(stderr, "accept() failed\n");
+      cli_sleep_ms(100U); /* back off: persistent errors (e.g. EMFILE) would spin */
       continue;
     }
 

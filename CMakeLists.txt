@@ -172,6 +172,14 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
         cli/utils/cli_args_parse.c)
     target_include_directories(test_cli_args_parse PRIVATE cli)
     add_test(NAME cli_args_parse COMMAND test_cli_args_parse)
+
+    # Engine behaviour tests link the sources directly (no shared-library export needed).
+    add_executable(test_cli_engine
+        tests/test_cli_engine.c
+        ${CLI_SOURCES})
+    target_include_directories(test_cli_engine PRIVATE cli)
+    target_link_libraries(test_cli_engine PRIVATE ${PLATFORM_LIBS})
+    add_test(NAME cli_engine COMMAND test_cli_engine)
 endif()
 
 # =========================================================================

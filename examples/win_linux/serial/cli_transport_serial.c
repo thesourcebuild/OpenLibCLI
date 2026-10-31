@@ -19,7 +19,8 @@
 #if ENV_IS_WINDOWS
 #include <conio.h>
 #elif ENV_IS_UNIX_LIKE
-#include <sys/select.h>
+#include <errno.h>
+#include <poll.h>
 #include <unistd.h>
 #endif
 
@@ -39,14 +40,7 @@
  * Private Types
  *=======================================================================================*/
 
-#if ENV_IS_UNIX_LIKE
-/** @brief Internal fd-pair slot used by the POSIX fd transport callbacks. */
-typedef struct {
-  int32_t rfd; /**< Read file descriptor. */
-  int32_t wfd; /**< Write file descriptor. */
-  bool in_use; /**< True when this slot is occupied. */
-} cli_fd_pair_struct_t;
-#endif
+/* No private types. */
 
 /*=======================================================================================
  * External Data Variables
@@ -64,10 +58,6 @@ static uint8_t s_serial_key_len = 0;
 static uint8_t s_serial_key_idx = 0;
 #endif
 
-#if ENV_IS_UNIX_LIKE
-/** @brief Static pool of fd-pair contexts, one slot per CLI instance. */
-static cli_fd_pair_struct_t s_fd_pool[1];
-#endif
 
 /*=======================================================================================
  * Private Function Prototypes
@@ -78,6 +68,11 @@ static cli_transport_ret_t cli_serial_transport_read(void *raw_ctx);
 static cli_transport_ret_t cli_serial_transport_write(void *raw_ctx, const uint8_t *buf,
                                                       cli_transport_buflen_t len);
 static cli_transport_ret_t cli_serial_transport_flush(void *raw_ctx);
+
+#if ENV_IS_WINDOWS
+static void serial_key_set(const char *seq);
+static void serial_translate_key(void);
+#endif
 
 #if ENV_IS_UNIX_LIKE
 static cli_transport_ret_t fd_available_raw(int32_t fd);
@@ -105,45 +100,24 @@ void cli_serial_init(cli_transport_struct_t *transport) {
 #if ENV_IS_UNIX_LIKE
 void cli_fd_init(cli_fd_ctx_struct_t *ctx, cli_transport_struct_t *transport, int32_t read_fd,
                  int32_t write_fd) {
-  int16_t slot = -1;
+  /* The caller's context carries the descriptors, so any number of fd transports can be
+   * active at once and initialisation cannot fail. */
+  ctx->read_fd = read_fd;
+  ctx->write_fd = write_fd;
 
-  for (int16_t i = 0; i < 1; i++) {
-    if (!s_fd_pool[i].in_use) {
-      slot = i;
-      break;
-    }
-  }
-
-  if (slot < 0) {
-    transport->available = NULL;
-    transport->read = NULL;
-    transport->write = NULL;
-    transport->flush = NULL;
-    transport->ctx = NULL;
-    transport->kind = CLI_TRANSPORT_SERIAL;
-  } else {
-    s_fd_pool[slot].rfd = read_fd;
-    s_fd_pool[slot].wfd = write_fd;
-    s_fd_pool[slot].in_use = true;
-
-    ctx->read_fd = read_fd;
-    ctx->write_fd = write_fd;
-
-    transport->available = cli_fd_transport_available;
-    transport->read = cli_fd_transport_read;
-    transport->write = cli_fd_transport_write;
-    transport->flush = NULL;
-    transport->ctx = &s_fd_pool[slot];
-    transport->kind = CLI_TRANSPORT_SERIAL;
-  }
+  transport->available = cli_fd_transport_available;
+  transport->read = cli_fd_transport_read;
+  transport->write = cli_fd_transport_write;
+  transport->flush = NULL;
+  transport->ctx = ctx;
+  transport->kind = CLI_TRANSPORT_SERIAL;
 }
 
 void cli_fd_deinit(cli_transport_struct_t *transport) {
   if (transport && transport->ctx) {
-    cli_fd_pair_struct_t *slot = (cli_fd_pair_struct_t *)transport->ctx;
-    slot->in_use = false;
-    slot->rfd = -1;
-    slot->wfd = -1;
+    cli_fd_ctx_struct_t *ctx = (cli_fd_ctx_struct_t *)transport->ctx;
+    ctx->read_fd = -1;
+    ctx->write_fd = -1;
 
     transport->read = NULL;
     transport->available = NULL;
@@ -165,22 +139,13 @@ static cli_transport_ret_t cli_serial_transport_available(void *raw_ctx) {
   (void)raw_ctx;
 
 #if ENV_IS_WINDOWS
-  if (s_serial_key_idx < s_serial_key_len) {
-    result = 1;
-  } else {
-    result = (_kbhit() != 0) ? 1 : 0;
+  /* Translate pending keystrokes until one produces input (unknown keys produce none). */
+  while (s_serial_key_idx >= s_serial_key_len && _kbhit() != 0) {
+    serial_translate_key();
   }
+  result = (s_serial_key_idx < s_serial_key_len) ? 1 : 0;
 #elif ENV_IS_UNIX_LIKE
-  fd_set rfds;
-  struct timeval tv;
-
-  FD_ZERO(&rfds);
-  FD_SET(STDIN_FILENO, &rfds);
-  tv.tv_sec = 0;
-  tv.tv_usec = 0;
-
-  int ready = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
-  result = (ready > 0) ? 1 : (ready < 0 ? -1 : 0);
+  result = fd_available_raw(STDIN_FILENO);
 #else
   result = -1;
 #endif
@@ -202,71 +167,20 @@ static cli_transport_ret_t cli_serial_transport_read(void *raw_ctx) {
 
 #if ENV_IS_WINDOWS
   if (s_serial_key_idx >= s_serial_key_len) {
-    if (_kbhit() == 0) {
-      result = -1;
-    } else {
-
-      int ch = _getch();
-      if (ch == 0xE0 || ch == 0x00) {
-        int ext = _getch();
-        switch (ext) {
-        case 0x48: /* Up */
-          s_serial_key_buf[0] = 0x1B;
-          s_serial_key_buf[1] = '[';
-          s_serial_key_buf[2] = 'A';
-          s_serial_key_len = 3;
-          break;
-        case 0x50: /* Down */
-          s_serial_key_buf[0] = 0x1B;
-          s_serial_key_buf[1] = '[';
-          s_serial_key_buf[2] = 'B';
-          s_serial_key_len = 3;
-          break;
-        case 0x4D: /* Right */
-          s_serial_key_buf[0] = 0x1B;
-          s_serial_key_buf[1] = '[';
-          s_serial_key_buf[2] = 'C';
-          s_serial_key_len = 3;
-          break;
-        case 0x4B: /* Left */
-          s_serial_key_buf[0] = 0x1B;
-          s_serial_key_buf[1] = '[';
-          s_serial_key_buf[2] = 'D';
-          s_serial_key_len = 3;
-          break;
-        case 0x47: /* Home */
-          s_serial_key_buf[0] = 0x01;
-          s_serial_key_len = 1;
-          break;   /* Ctrl+A */
-        case 0x4F: /* End */
-          s_serial_key_buf[0] = 0x05;
-          s_serial_key_len = 1;
-          break;   /* Ctrl+E */
-        case 0x53: /* Delete */
-          s_serial_key_buf[0] = 0x04;
-          s_serial_key_len = 1;
-          break; /* Ctrl+D (delete) */
-        default:
-          s_serial_key_buf[0] = (uint8_t)ext;
-          s_serial_key_len = 1;
-          break;
-        }
-      } else {
-        s_serial_key_buf[0] = (uint8_t)ch;
-        s_serial_key_len = 1;
-      }
-
-      s_serial_key_idx = 0;
-      result = s_serial_key_buf[s_serial_key_idx];
-      s_serial_key_idx++;
-    }
-  } else {
+    (void)cli_serial_transport_available(raw_ctx);
+  }
+  if (s_serial_key_idx < s_serial_key_len) {
     result = s_serial_key_buf[s_serial_key_idx];
     s_serial_key_idx++;
+  } else {
+    result = -1;
   }
 #elif ENV_IS_UNIX_LIKE
   uint8_t byte;
-  cli_transport_ret_t rc = read(STDIN_FILENO, &byte, 1);
+  ssize_t rc;
+  do {
+    rc = read(STDIN_FILENO, &byte, 1);
+  } while (rc < 0 && errno == EINTR);
   result = (rc == 1) ? byte : -1;
 #else
   result = -1;
@@ -294,7 +208,7 @@ static cli_transport_ret_t cli_serial_transport_write(void *raw_ctx, const uint8
   }
   return len;
 #elif ENV_IS_UNIX_LIKE
-  return write(STDOUT_FILENO, buf, len);
+  return fd_write_raw(STDOUT_FILENO, buf, len);
 #else
   (void)buf;
   (void)len;
@@ -319,47 +233,142 @@ static cli_transport_ret_t cli_serial_transport_flush(void *raw_ctx) {
   return 0;
 }
 
+#if ENV_IS_WINDOWS
+/**
+ * @brief Queue a translated key sequence for @c cli_serial_transport_read().
+ *
+ * @param[in] seq  NUL-terminated byte sequence (at most 4 bytes).
+ */
+static void serial_key_set(const char *seq) {
+  uint8_t n = 0U;
+
+  while (seq[n] != '\0' && n < (uint8_t)sizeof(s_serial_key_buf)) {
+    s_serial_key_buf[n] = (uint8_t)seq[n];
+    n++;
+  }
+  s_serial_key_len = n;
+  s_serial_key_idx = 0U;
+}
+
+/**
+ * @brief Read one console keystroke and translate it into CLI input bytes.
+ *
+ * Extended keys (arrows, Home, End, Delete) become the VT100 sequences the CLI
+ * engine understands; other extended keys (F1..F12, Insert, PgUp, ...) produce
+ * no input. @c _getch() reports an extended key as a 0x00 / 0xE0 prefix with the
+ * scan code already queued behind it; a 0xE0 with nothing queued is an ordinary
+ * character of the console code page (e.g. 'α' in CP437), not a prefix.
+ */
+static void serial_translate_key(void) {
+  int ch = _getch();
+
+  s_serial_key_len = 0U;
+  s_serial_key_idx = 0U;
+
+  if (ch == 0x00 || (ch == 0xE0 && _kbhit() != 0)) {
+    switch (_getch()) {
+    case 0x48: /* Up */
+      serial_key_set("\x1b[A");
+      break;
+    case 0x50: /* Down */
+      serial_key_set("\x1b[B");
+      break;
+    case 0x4D: /* Right */
+      serial_key_set("\x1b[C");
+      break;
+    case 0x4B: /* Left */
+      serial_key_set("\x1b[D");
+      break;
+    case 0x47: /* Home */
+      serial_key_set("\x1b[H");
+      break;
+    case 0x4F: /* End */
+      serial_key_set("\x1b[F");
+      break;
+    case 0x53: /* Delete (not Ctrl+D, which quits on an empty line) */
+      serial_key_set("\x1b[3~");
+      break;
+    default:
+      /* Function / navigation key without a CLI meaning: no input. */
+      break;
+    }
+  } else {
+    s_serial_key_buf[0] = (uint8_t)ch;
+    s_serial_key_len = 1U;
+  }
+}
+#endif
+
 #if ENV_IS_UNIX_LIKE
 /**
- * @brief Read directly from a POSIX file descriptor.
+ * @brief Report whether a POSIX file descriptor has input ready.
  *
- * @param[in]  fd   File descriptor.
- * @param[out] buf  Destination buffer.
- * @param[in]  len  Maximum number of bytes to read.
+ * @param[in] fd  File descriptor.
  *
- * @return Bytes read, or @c -1 on error.
+ * @return 1 if readable, 0 if not (or interrupted by a signal), -1 on error.
  */
 static cli_transport_ret_t fd_available_raw(int32_t fd) {
-  fd_set rfds;
-  struct timeval tv;
+  /* poll() works for any descriptor number; select() is undefined at fd >= FD_SETSIZE. */
+  struct pollfd pfd;
 
-  FD_ZERO(&rfds);
-  FD_SET(fd, &rfds);
-  tv.tv_sec = 0;
-  tv.tv_usec = 0;
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  pfd.revents = 0;
 
-  int ready = select(fd + 1, &rfds, NULL, NULL, &tv);
+  int ready = poll(&pfd, 1, 0);
+  if (ready < 0 && errno == EINTR) {
+    ready = 0;
+  } else if (ready > 0 && (pfd.revents & POLLNVAL) != 0) {
+    ready = -1;
+  } else {
+    /* POLLIN or POLLHUP: read() reports data or end of file. */
+  }
   return (ready > 0) ? 1 : (ready < 0 ? -1 : 0);
 }
 
+/**
+ * @brief Read one byte from a POSIX file descriptor.
+ *
+ * @param[in] fd  File descriptor.
+ *
+ * @return Byte value 0..255, or @c -1 on error / end of file.
+ */
 static cli_transport_ret_t fd_read_raw(int32_t fd) {
   uint8_t byte;
-  cli_transport_ret_t rc = read(fd, &byte, 1);
+  ssize_t rc;
+  do {
+    rc = read(fd, &byte, 1);
+  } while (rc < 0 && errno == EINTR);
   return (rc == 1) ? byte : -1;
 }
 
 /**
- * @brief Write directly to a POSIX file descriptor.
+ * @brief Write a whole buffer to a POSIX file descriptor.
+ *
+ * Partial writes and signal interruptions are retried.
  *
  * @param[in] fd   File descriptor.
  * @param[in] buf  Source buffer.
  * @param[in] len  Number of bytes to write.
  *
- * @return Bytes written, or @c -1 on error.
+ * @return @p len on success, or @c -1 on error.
  */
 static cli_transport_ret_t fd_write_raw(int32_t fd, const uint8_t *buf,
                                         cli_transport_buflen_t len) {
-  return write(fd, buf, len);
+  size_t sent = 0;
+
+  while (sent < (size_t)len) {
+    ssize_t n = write(fd, &buf[sent], (size_t)len - sent);
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    if (n <= 0) {
+      return -1;
+    }
+    sent += (size_t)n;
+  }
+
+  return (cli_transport_ret_t)len;
 }
 
 /**
@@ -372,13 +381,13 @@ static cli_transport_ret_t fd_write_raw(int32_t fd, const uint8_t *buf,
  * @return Bytes read, or @c -1 on error.
  */
 static cli_transport_ret_t cli_fd_transport_available(void *ctx) {
-  cli_fd_pair_struct_t *pair = (cli_fd_pair_struct_t *)ctx;
-  return fd_available_raw(pair->rfd);
+  const cli_fd_ctx_struct_t *fds = (const cli_fd_ctx_struct_t *)ctx;
+  return fd_available_raw(fds->read_fd);
 }
 
 static cli_transport_ret_t cli_fd_transport_read(void *ctx) {
-  cli_fd_pair_struct_t *pair = (cli_fd_pair_struct_t *)ctx;
-  return fd_read_raw(pair->rfd);
+  const cli_fd_ctx_struct_t *fds = (const cli_fd_ctx_struct_t *)ctx;
+  return fd_read_raw(fds->read_fd);
 }
 
 /**
@@ -392,8 +401,8 @@ static cli_transport_ret_t cli_fd_transport_read(void *ctx) {
  */
 static cli_transport_ret_t cli_fd_transport_write(void *ctx, const uint8_t *buf,
                                                   cli_transport_buflen_t len) {
-  cli_fd_pair_struct_t *pair = (cli_fd_pair_struct_t *)ctx;
-  return fd_write_raw(pair->wfd, buf, len);
+  const cli_fd_ctx_struct_t *fds = (const cli_fd_ctx_struct_t *)ctx;
+  return fd_write_raw(fds->write_fd, buf, len);
 }
 #endif
 

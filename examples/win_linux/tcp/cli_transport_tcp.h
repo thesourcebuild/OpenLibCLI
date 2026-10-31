@@ -72,6 +72,11 @@ extern "C" {
 /** @brief Operation failed. */
 #define CLI_TCP_ERR (-1)
 
+#ifndef CLI_TCP_SEND_TIMEOUT_MS
+/** @brief A send blocked for this long (client not reading) ends the session. */
+#define CLI_TCP_SEND_TIMEOUT_MS 5000
+#endif
+
 /*=======================================================================================
  * Public Macros
  *=======================================================================================*/
@@ -90,8 +95,9 @@ extern "C" {
  */
 typedef struct {
   int32_t fd;        /**< Connected socket file descriptor. */
-  bool auto_newline; /**< Inject @c '\n' after a burst that lacks line ending. */
-  uint8_t rx_buf[CLI_MAX_INPUT_LEN + 2]; /**< Receive buffer plus synthetic newline room. */
+  bool auto_newline; /**< Inject @c '\n' when a line is left open by an idle peer. */
+  bool line_open;    /**< Last received byte was not a line terminator. */
+  uint8_t rx_buf[CLI_MAX_INPUT_LEN + 2]; /**< Receive buffer. */
   uint16_t rx_len;                       /**< Valid bytes in @c rx_buf. */
   uint16_t rx_pos;                       /**< Next unread byte offset. */
 } cli_tcp_ctx_struct_t;
@@ -109,8 +115,10 @@ typedef struct {
 /**
  * @brief Create a listening TCP socket bound to all interfaces on @p port.
  *
- * Sets @c SO_REUSEADDR so the server can restart immediately after a crash
- * without "Address already in use" errors.
+ * Sets @c SO_REUSEADDR (POSIX) so the server can restart immediately after a
+ * crash without "Address already in use" errors. On Windows
+ * @c SO_EXCLUSIVEADDRUSE is used instead, because Windows' @c SO_REUSEADDR
+ * would let another process bind the same port.
  *
  * @param[in] port  TCP port number to listen on (host byte order).
  *
@@ -122,8 +130,9 @@ int32_t cli_tcp_listen(uint16_t port);
  * @brief Block until one client connects on @p listen_fd.
  *
  * Sets @c TCP_NODELAY (disables Nagle algorithm for low-latency character
- * echo) and @c SO_RCVTIMEO (set to @c CLI_TRANSPORT_POLL_MS) on the accepted
- * socket.
+ * echo) and @c SO_SNDTIMEO (@c CLI_TCP_SEND_TIMEOUT_MS) on the accepted socket;
+ * on macOS also @c SO_NOSIGPIPE. Reads wait (@c poll() on POSIX, @c select() on
+ * Windows) for up to @c CLI_TRANSPORT_POLL_MS.
  *
  * @param[in] listen_fd  Fd returned by @c cli_tcp_listen().
  *
@@ -135,9 +144,10 @@ int32_t cli_tcp_accept(int32_t listen_fd);
  * @brief Bind a connected TCP socket to a @c cli_transport_struct_t vtable.
  *
  * This exposes a plain stream socket to the CLI core without Telnet IAC
- * negotiation. When @p auto_newline is @c true, the transport appends a
- * synthetic @c '\n' to any received burst that does not already end with
- * @c '\r' or @c '\n'.
+ * negotiation. When @p auto_newline is @c true, the transport submits a line
+ * that the peer left without @c '\r' / @c '\n' once no further data arrives
+ * for @c CLI_TRANSPORT_POLL_MS (for line-oriented clients that omit the
+ * terminator). Leave it @c false for interactive, character-at-a-time clients.
  *
  * @param[out] ctx           Caller-allocated context that must outlive the session.
  * @param[out] transport     Filled with @c read, @c write, and @c flush callbacks.

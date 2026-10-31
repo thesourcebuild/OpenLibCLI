@@ -26,8 +26,8 @@
 #else
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
-#include <sys/select.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -73,7 +73,10 @@
  *=======================================================================================*/
 
 #if ENV_IS_WINDOWS
-static void build_win_pipe_path(char *buf, int32_t buflen, const char *name);
+static bool build_win_pipe_path(char *buf, int32_t buflen, const char *name);
+#else
+static bool build_fifo_paths(const char *name, char *in_path, char *out_path, size_t size);
+static bool ensure_fifo(const char *path, bool *created);
 #endif
 static cli_transport_ret_t cli_pipe_transport_available(void *raw);
 static cli_transport_ret_t cli_pipe_transport_read(void *raw);
@@ -88,12 +91,13 @@ static cli_transport_ret_t cli_pipe_transport_write(void *raw, const uint8_t *bu
 int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
   char path[PIPE_PATH_MAX];
   int32_t rc = CLI_PIPE_ERR;
+  HANDLE handle = INVALID_HANDLE_VALUE;
 
-  build_win_pipe_path(path, sizeof(path), name);
-
-  HANDLE handle =
-      CreateNamedPipeA(path, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1,
-                       4096, 4096, 0, NULL);
+  if (build_win_pipe_path(path, sizeof(path), name)) {
+    handle = CreateNamedPipeA(path, PIPE_ACCESS_DUPLEX,
+                              PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0,
+                              NULL);
+  }
   if (handle != INVALID_HANDLE_VALUE) {
     if (ConnectNamedPipe(handle, NULL) || GetLastError() == ERROR_PIPE_CONNECTED) {
       ctx->h_read = (void *)handle;
@@ -111,9 +115,7 @@ int32_t cli_named_pipe_connect(const char *name, cli_pipe_ctx_struct_t *ctx) {
   char path[PIPE_PATH_MAX];
   HANDLE handle = INVALID_HANDLE_VALUE;
   int32_t rc = CLI_PIPE_ERR;
-  int32_t attempts = 0;
-
-  build_win_pipe_path(path, sizeof(path), name);
+  int32_t attempts = (build_win_pipe_path(path, sizeof(path), name)) ? 0 : 5;
 
   while (attempts < 5) {
     handle = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
@@ -121,10 +123,17 @@ int32_t cli_named_pipe_connect(const char *name, cli_pipe_ctx_struct_t *ctx) {
       break;
     }
 
-    if (GetLastError() == ERROR_PIPE_BUSY) {
+    DWORD error = GetLastError();
+    if (error == ERROR_PIPE_BUSY) {
+      /* Instance exists but is serving another client: wait for it to free up. */
       if (!WaitNamedPipeA(path, 1000)) {
         break;
       }
+    } else if (error == ERROR_FILE_NOT_FOUND) {
+      /* Server is between sessions and has not re-created the pipe yet. */
+      Sleep(200);
+    } else {
+      break; /* access denied, bad name, ...: retrying cannot help */
     }
 
     attempts++;
@@ -188,12 +197,12 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
   int32_t rfd = -1;
   int32_t wfd = -1;
   int32_t rc = CLI_PIPE_ERR;
+  bool in_created = false;
+  bool out_created = false;
 
-  cli_snprintf(in_path, sizeof(in_path), "%s.in", name);
-  cli_snprintf(out_path, sizeof(out_path), "%s.out", name);
-
-  if (mkfifo(in_path, 0666) == 0 || errno == EEXIST) {
-    if (mkfifo(out_path, 0666) == 0 || errno == EEXIST) {
+  if (build_fifo_paths(name, in_path, out_path, sizeof(in_path)) &&
+      ensure_fifo(in_path, &in_created)) {
+    if (ensure_fifo(out_path, &out_created)) {
       rfd = open(in_path, O_RDONLY | O_NONBLOCK);
       if (rfd >= 0) {
         wfd = open(out_path, O_WRONLY);
@@ -208,8 +217,10 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
           rc = CLI_PIPE_OK;
         }
       }
+    } else if (in_created) {
+      unlink(in_path); /* only remove what this call created */
     } else {
-      unlink(in_path);
+      /* Pre-existing FIFO stays in place. */
     }
   }
 
@@ -229,11 +240,11 @@ int32_t cli_named_pipe_connect(const char *name, cli_pipe_ctx_struct_t *ctx) {
   char in_path[FIFO_PATH_MAX];
   char out_path[FIFO_PATH_MAX];
   int32_t rc = CLI_PIPE_ERR;
+  int32_t rfd = -1;
 
-  cli_snprintf(in_path, sizeof(in_path), "%s.in", name);
-  cli_snprintf(out_path, sizeof(out_path), "%s.out", name);
-
-  int32_t rfd = open(out_path, O_RDONLY);
+  if (build_fifo_paths(name, in_path, out_path, sizeof(in_path))) {
+    rfd = open(out_path, O_RDONLY);
+  }
   if (rfd >= 0) {
     int32_t wfd = open(in_path, O_WRONLY);
     if (wfd >= 0) {
@@ -300,19 +311,70 @@ void cli_pipe_close(cli_pipe_ctx_struct_t *ctx) {
 /**
  * @brief Build a fully-qualified Windows named-pipe path.
  *
- * @param[out] buf     Destination buffer.
+ * @param[out] buf     Destination buffer (always NUL-terminated).
  * @param[in]  buflen  Size of @p buf in bytes.
- * @param[in]  name    User-supplied pipe name.
+ * @param[in]  name    User-supplied pipe name, or a full @c \\\\.\\pipe\\... path.
+ *
+ * @return @c true on success; @c false if the path does not fit (a truncated
+ *         name would silently address a different pipe).
  */
-static void build_win_pipe_path(char *buf, int32_t buflen, const char *name) {
+static bool build_win_pipe_path(char *buf, int32_t buflen, const char *name) {
+  int n;
+
   if (strncmp(name, "\\\\", 2) == 0) {
-    size_t name_len = strlen(name);
-    size_t copy_len = (name_len < (size_t)(buflen - 1)) ? name_len : (size_t)(buflen - 1);
-    memcpy(buf, name, copy_len);
-    buf[copy_len] = '\0';
+    n = cli_snprintf(buf, (size_t)buflen, "%s", name);
   } else {
-    _snprintf(buf, (size_t)buflen, "\\\\.\\pipe\\%s", name);
+    n = cli_snprintf(buf, (size_t)buflen, "\\\\.\\pipe\\%s", name);
   }
+
+  return (n >= 0 && n < buflen);
+}
+#else
+/**
+ * @brief Build the "<name>.in" / "<name>.out" FIFO paths.
+ *
+ * @param[in]  name      Base path.
+ * @param[out] in_path   Client-to-server FIFO path.
+ * @param[out] out_path  Server-to-client FIFO path.
+ * @param[in]  size      Size of each output buffer.
+ *
+ * @return @c true if both paths fit without truncation.
+ */
+static bool build_fifo_paths(const char *name, char *in_path, char *out_path, size_t size) {
+  int n_in = cli_snprintf(in_path, size, "%s.in", name);
+  int n_out = cli_snprintf(out_path, size, "%s.out", name);
+
+  return (n_in >= 0 && (size_t)n_in < size && n_out >= 0 && (size_t)n_out < size);
+}
+
+/**
+ * @brief Create the FIFO @p path, or accept an existing one if it really is a FIFO.
+ *
+ * @param[in]  path     FIFO path.
+ * @param[out] created  Set to @c true when this call created the FIFO.
+ *
+ * @return @c true if @p path is a usable FIFO; @c false (with @c errno set) otherwise.
+ */
+static bool ensure_fifo(const char *path, bool *created) {
+  bool ok = false;
+  struct stat st;
+
+  *created = false;
+  if (mkfifo(path, 0666) == 0) {
+    *created = true;
+    ok = true;
+  } else if (errno == EEXIST) {
+    /* Never write CLI traffic into (or later delete) a regular file of the same name. */
+    if (lstat(path, &st) == 0 && S_ISFIFO(st.st_mode)) {
+      ok = true;
+    } else {
+      errno = EEXIST;
+    }
+  } else {
+    /* mkfifo failed (permissions, missing directory, ...). */
+  }
+
+  return ok;
 }
 #endif
 
@@ -326,15 +388,21 @@ static cli_transport_ret_t cli_pipe_transport_available(void *raw) {
     rc = (available > 0U) ? 1 : 0;
   }
 #else
-  fd_set rfds;
-  struct timeval tv;
+  /* poll() works for any descriptor number; select() is undefined at fd >= FD_SETSIZE. */
+  struct pollfd pfd;
 
-  FD_ZERO(&rfds);
-  FD_SET(ctx->read_fd, &rfds);
-  tv.tv_sec = 0;
-  tv.tv_usec = 0;
+  pfd.fd = ctx->read_fd;
+  pfd.events = POLLIN;
+  pfd.revents = 0;
 
-  int ready = select(ctx->read_fd + 1, &rfds, NULL, NULL, &tv);
+  int ready = poll(&pfd, 1, 0);
+  if (ready < 0 && errno == EINTR) {
+    ready = 0;
+  } else if (ready > 0 && (pfd.revents & POLLNVAL) != 0) {
+    ready = -1;
+  } else {
+    /* POLLIN or POLLHUP: read() reports data or end of file. */
+  }
   rc = (ready > 0) ? 1 : (ready < 0 ? CLI_PIPE_ERR : 0);
 #endif
 
@@ -359,7 +427,10 @@ static cli_transport_ret_t cli_pipe_transport_read(void *raw) {
     rc = byte;
   }
 #else
-  ssize_t count = read(ctx->read_fd, &byte, 1);
+  ssize_t count;
+  do {
+    count = read(ctx->read_fd, &byte, 1);
+  } while (count < 0 && errno == EINTR);
   if (count == 1) {
     rc = byte;
   }
@@ -369,32 +440,42 @@ static cli_transport_ret_t cli_pipe_transport_read(void *raw) {
 }
 
 /**
- * @brief Write for the pipe transport.
+ * @brief Write a whole buffer to the pipe transport.
+ *
+ * Partial writes and (POSIX) signal interruptions are retried until every
+ * byte has been written.
  *
  * @param[in] raw  Pipe transport context.
  * @param[in] buf  Source buffer.
  * @param[in] len  Number of bytes to write.
  *
- * @return Bytes written on success, or @c CLI_PIPE_ERR on failure.
+ * @return @p len on success, or @c CLI_PIPE_ERR on failure.
  */
 static cli_transport_ret_t cli_pipe_transport_write(void *raw, const uint8_t *buf,
                                                     cli_transport_buflen_t len) {
   cli_pipe_ctx_struct_t *ctx = (cli_pipe_ctx_struct_t *)raw;
-  cli_transport_ret_t rc = CLI_PIPE_ERR;
+  size_t sent = 0;
+  bool ok = true;
 
+  while (ok && sent < (size_t)len) {
 #if ENV_IS_WINDOWS
-  DWORD count = 0;
-  if (WriteFile((HANDLE)ctx->h_write, buf, (DWORD)len, &count, NULL)) {
-    rc = (cli_transport_ret_t)count;
-  }
+    DWORD count = 0;
+    ok = WriteFile((HANDLE)ctx->h_write, &buf[sent], (DWORD)((size_t)len - sent), &count, NULL) &&
+         count > 0U;
+    sent += (size_t)count;
 #else
-  ssize_t count = write(ctx->write_fd, buf, len);
-  if (count >= 0) {
-    rc = (cli_transport_ret_t)count;
-  }
+    ssize_t count = write(ctx->write_fd, &buf[sent], (size_t)len - sent);
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    ok = (count > 0);
+    if (ok) {
+      sent += (size_t)count;
+    }
 #endif
+  }
 
-  return rc;
+  return ok ? (cli_transport_ret_t)len : CLI_PIPE_ERR;
 }
 
 /*################################### END OF FILE ######################################*/

@@ -72,8 +72,9 @@
 #endif
 #include <windows.h>
 #else
+#include <poll.h>
 #include <pthread.h>
-#include <sys/select.h>
+#include <signal.h>
 #include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
@@ -169,6 +170,11 @@ int main(int argc, char *argv[]) {
   const char *mode = (argc > 1) ? argv[1] : "named";
   const char *name = (argc > 2) ? argv[2] : PIPE_DEFAULT_NAME;
 
+#if !ENV_IS_WINDOWS
+  /* Writing to a FIFO whose reader went away must end the session, not kill the process. */
+  signal(SIGPIPE, SIG_IGN);
+#endif
+
   if (strcmp(mode, "named") == 0) {
     run_named_server(name);
   } else if (strcmp(mode, "client") == 0) {
@@ -194,13 +200,15 @@ int main(int argc, char *argv[]) {
 /**
  * @brief Start a new Windows thread.
  *
- * @param[in] fn   Thread entry point.
- * @param[in] arg  Argument passed to @p fn.
+ * @param[out] t    Thread handle on success.
+ * @param[in]  fn   Thread entry point.
+ * @param[in]  arg  Argument passed to @p fn.
  *
- * @return Thread handle.
+ * @return @c true if the thread was started.
  */
-static cli_thread_t cli_thread_start(LPTHREAD_START_ROUTINE fn, void *arg) {
-  return CreateThread(NULL, 0, fn, arg, 0, NULL);
+static bool cli_thread_start(cli_thread_t *t, LPTHREAD_START_ROUTINE fn, void *arg) {
+  *t = CreateThread(NULL, 0, fn, arg, 0, NULL);
+  return (*t != NULL);
 }
 /**
  * @brief Wait for a Windows thread to finish and close its handle.
@@ -215,15 +223,14 @@ static void cli_thread_join(cli_thread_t t) {
 /**
  * @brief Start a new POSIX thread.
  *
- * @param[in] fn   Thread entry function.
- * @param[in] arg  Argument passed to @p fn.
+ * @param[out] t    Thread id on success.
+ * @param[in]  fn   Thread entry function.
+ * @param[in]  arg  Argument passed to @p fn.
  *
- * @return Thread id.
+ * @return @c true if the thread was started.
  */
-static cli_thread_t cli_thread_start(void *(*fn)(void *), void *arg) {
-  pthread_t t;
-  pthread_create(&t, NULL, fn, arg);
-  return t;
+static bool cli_thread_start(cli_thread_t *t, void *(*fn)(void *), void *arg) {
+  return (pthread_create(t, NULL, fn, arg) == 0);
 }
 /**
  * @brief Wait for a POSIX thread to finish.
@@ -324,12 +331,11 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
       Sleep(1);
     }
 #else
-    int32_t fd = ((cli_pipe_ctx_struct_t *)cli->transport.ctx)->read_fd;
-    struct timeval tv = {1, 0};
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(fd, &rfds);
-    select(fd + 1, &rfds, NULL, NULL, &tv);
+    struct pollfd pfd;
+    pfd.fd = ((cli_pipe_ctx_struct_t *)cli->transport.ctx)->read_fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    (void)poll(&pfd, 1, 1000);
 #endif
     rc = cli_session_engine(cli);
     if (rc != CLI_OK) {
@@ -557,7 +563,9 @@ static void pipe_raw_mode(void) {
     struct termios term;
     if (tcgetattr(STDIN_FILENO, &s_pipe_orig_term) == 0) {
       term = s_pipe_orig_term;
-      term.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE);
+      /* ISIG off: Ctrl-C / Ctrl-Z go to the CLI instead of killing this client with the
+       * terminal still in no-echo mode. */
+      term.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE | ISIG);
       term.c_cc[VMIN] = 1;
       term.c_cc[VTIME] = 0;
       if (tcsetattr(STDIN_FILENO, TCSANOW, &term) == 0) {
@@ -631,13 +639,22 @@ static void run_named_client(const char *name) {
     fflush(stdout);
 
     relay_ctx_struct_t rctx = {&pipe_ctx, 0};
+    cli_thread_t reader_t;
+    cli_thread_t writer_t;
+
     pipe_raw_mode();
-    cli_thread_t reader_t = cli_thread_start(relay_reader_fn, &rctx);
-    cli_thread_t writer_t = cli_thread_start(relay_writer_fn, &rctx);
-    cli_thread_join(reader_t);
-    rctx.done = 1;
-    pthread_cancel(writer_t);
-    cli_thread_join(writer_t);
+    if (!cli_thread_start(&reader_t, relay_reader_fn, &rctx)) {
+      perror("pthread_create");
+    } else if (!cli_thread_start(&writer_t, relay_writer_fn, &rctx)) {
+      perror("pthread_create");
+      pthread_cancel(reader_t); /* read() is a cancellation point */
+      cli_thread_join(reader_t);
+    } else {
+      cli_thread_join(reader_t);
+      rctx.done = 1;
+      pthread_cancel(writer_t);
+      cli_thread_join(writer_t);
+    }
     pipe_restore_term();
 
     cli_pipe_close(&pipe_ctx);
@@ -687,6 +704,8 @@ static PFT_THREAD_FN anon_server_fn(PFT_THREAD_ARG arg) {
   cli_struct_t *cli = (cli_struct_t *)arg;
   cli_server_loop(cli);
 
+  /* The server thread is the only owner of the server-side handles: closing them here
+   * also tells the relay (main thread) that the session is over. */
   cli_pipe_ctx_struct_t *ctx = (cli_pipe_ctx_struct_t *)cli->transport.ctx;
   if (ctx) {
     cli_pipe_close(ctx);
@@ -720,24 +739,46 @@ static void run_anon_demo(void) {
     setup_session(&demo_cli, 1);
 
 #if ENV_IS_WINDOWS
-    cli_thread_t srv_t = cli_thread_start(anon_server_fn, &demo_cli);
-    run_interactive_relay(&clt);
-    cli_pipe_close(&srv);
-    cli_thread_join(srv_t);
+    cli_thread_t srv_t;
+    if (!cli_thread_start(&srv_t, anon_server_fn, &demo_cli)) {
+      fprintf(stderr, "CreateThread failed (%lu)\n", GetLastError());
+      cli_done(&demo_cli);
+      cli_pipe_close(&srv);
+    } else {
+      run_interactive_relay(&clt);
+      /* Closing the client side breaks the pipe for the server, which then stops and
+       * closes its own handles (srv) — only that thread touches them. */
+      cli_pipe_close(&clt);
+      cli_thread_join(srv_t);
+    }
 #else
     anon_ctx_struct_t actx = {&clt, 0};
-    pipe_raw_mode();
-    cli_thread_t reader_t = cli_thread_start(anon_reader_fn, &actx);
-    cli_thread_t writer_t = cli_thread_start(relay_writer_fn, &actx);
+    cli_thread_t reader_t;
+    cli_thread_t writer_t;
+    bool reader_ok;
+    bool writer_ok;
 
-    cli_server_loop(&demo_cli);
+    pipe_raw_mode();
+    reader_ok = cli_thread_start(&reader_t, anon_reader_fn, &actx);
+    writer_ok = reader_ok && cli_thread_start(&writer_t, relay_writer_fn, &actx);
+    if (!writer_ok) {
+      perror("pthread_create");
+    } else {
+      cli_server_loop(&demo_cli);
+    }
     cli_done(&demo_cli);
 
-    cli_pipe_close(&srv);
+    cli_pipe_close(&srv); /* EOF for the reader thread */
     actx.done = 1;
-    pthread_cancel(writer_t);
-    cli_thread_join(reader_t);
-    cli_thread_join(writer_t);
+    if (writer_ok) {
+      pthread_cancel(writer_t);
+    }
+    if (reader_ok) {
+      cli_thread_join(reader_t);
+    }
+    if (writer_ok) {
+      cli_thread_join(writer_t);
+    }
     pipe_restore_term();
 #endif
 

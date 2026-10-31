@@ -35,10 +35,10 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
-#include <fcntl.h>
 #endif
 
 /*=======================================================================================
@@ -68,6 +68,13 @@
 #define TELNET_OPT_NAWS 31U
 /** @brief Linemode option. */
 #define TELNET_OPT_LINEMODE 34U
+
+/** @brief Our WILL ECHO is awaiting DO / DONT. */
+#define TELNET_PENDING_ECHO 0x01U
+/** @brief Our WILL SGA is awaiting DO / DONT. */
+#define TELNET_PENDING_SGA 0x02U
+/** @brief Our DO NAWS is awaiting WILL / WONT. */
+#define TELNET_PENDING_NAWS 0x04U
 
 /** @brief IAC parser is waiting for regular data. */
 #define TELNET_STATE_NORMAL 0U
@@ -107,8 +114,17 @@
 /** @brief Socket receive wrapper. */
 #define CLI_TELNET_SOCK_READ(sock, buf, len)  read((sock), (buf), (len))
 
+#ifdef MSG_NOSIGNAL
+/** @brief Send flags: report EPIPE instead of raising SIGPIPE (Linux / BSD). */
+#define CLI_TELNET_SEND_FLAGS MSG_NOSIGNAL
+#else
+/** @brief macOS has no MSG_NOSIGNAL; SO_NOSIGPIPE is set on the socket instead. */
+#define CLI_TELNET_SEND_FLAGS 0
+#endif
+
 /** @brief Socket send wrapper. */
-#define CLI_TELNET_SOCK_WRITE(sock, buf, len) send((sock), (const char *)(buf), (len), 0)
+#define CLI_TELNET_SOCK_WRITE(sock, buf, len)                                                      \
+  send((sock), (const char *)(buf), (len), CLI_TELNET_SEND_FLAGS)
 #endif
 
 /*=======================================================================================
@@ -146,8 +162,11 @@ static const uint8_t s_telnet_negotiation[] = {
 #if ENV_IS_WINDOWS
 static int32_t cli_telnet_winsock_init(void);
 #endif
-static int32_t cli_set_recv_timeout_ms(cli_sock_t sock, int32_t timeout_ms);
+static bool cli_telnet_is_interrupted(void);
+static int32_t cli_telnet_wait_readable(cli_sock_t sock, uint32_t timeout_ms);
 
+static bool cli_telnet_option_update(cli_telnet_ctx_struct_t *ctx, bool *enabled, uint8_t bit,
+                                     bool enable);
 static void cli_telnet_respond(cli_telnet_ctx_struct_t *ctx, uint8_t verb, uint8_t opt);
 static bool cli_telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, uint8_t *out);
 
@@ -169,21 +188,6 @@ void cli_telnet_init(cli_telnet_ctx_struct_t *ctx, cli_transport_struct_t *trans
   ctx->fd = fd;
   ctx->state = TELNET_STATE_NORMAL;
 
-  cli_set_recv_timeout_ms((cli_sock_t)ctx->fd, CLI_TRANSPORT_POLL_MS);
-  /*
-  #if ENV_IS_WINDOWS
-          {
-            u_long mode = 1;
-            ioctlsocket((cli_sock_t)fd, FIONBIO, &mode);
-          }
-  #else
-          {
-            int32_t flags = fcntl((cli_sock_t)fd, F_GETFL, 0);
-            fcntl((cli_sock_t)fd, F_SETFL, flags | O_NONBLOCK);
-          }
-  #endif
-  */
-
   transport->available = cli_telnet_transport_available;
   transport->read = cli_telnet_transport_read;
   transport->write = cli_telnet_transport_write;
@@ -196,10 +200,9 @@ void cli_telnet_negotiate(cli_telnet_ctx_struct_t *ctx) {
   (void)cli_telnet_send_all((cli_sock_t)ctx->fd, s_telnet_negotiation,
                             sizeof(s_telnet_negotiation));
   ctx->negotiated = true;
-  ctx->local_echo = true;
-  ctx->local_sga = true;
-  ctx->remote_linemode_rejected = true;
-  ctx->remote_naws = true;
+  /* Options take effect only once the peer answers (RFC 1143); until then the requests
+   * are pending. DONT LINEMODE asks for the default state and expects no answer. */
+  ctx->pending = (uint8_t)(TELNET_PENDING_ECHO | TELNET_PENDING_SGA | TELNET_PENDING_NAWS);
 }
 
 int32_t cli_telnet_listen(uint16_t port) {
@@ -217,8 +220,9 @@ int32_t cli_telnet_listen(uint16_t port) {
 
 #if ENV_IS_WINDOWS
       {
+        /* SO_REUSEADDR on Windows would let another process bind the same port. */
         BOOL yes = TRUE;
-        (void)setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&yes, sizeof(yes));
+        (void)setsockopt(sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&yes, sizeof(yes));
       }
 #else
       {
@@ -257,21 +261,27 @@ int32_t cli_telnet_accept(int32_t listen_fd) {
   cli_sock_t client = accept((cli_sock_t)listen_fd, (struct sockaddr *)&peer, &peer_len);
   if (client != CLI_TELNET_INVALID_NATIVE_SOCKET) {
 
+    /* Reads wait in cli_telnet_wait_readable(); the send timeout stops a client
+     * that never reads its output from blocking the single-threaded server forever. */
 #if ENV_IS_WINDOWS
     {
       BOOL nd = TRUE;
-      DWORD rcv_to = (DWORD)CLI_TRANSPORT_POLL_MS;
+      DWORD snd_to = (DWORD)CLI_TELNET_SEND_TIMEOUT_MS;
       (void)setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (const char *)&nd, sizeof(nd));
-      (void)setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char *)&rcv_to, sizeof(rcv_to));
+      (void)setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char *)&snd_to, sizeof(snd_to));
     }
 #else
     {
       int32_t nd = 1;
       struct timeval tv;
-      tv.tv_sec = CLI_TRANSPORT_POLL_MS / 1000;
-      tv.tv_usec = (CLI_TRANSPORT_POLL_MS % 1000) * 1000;
+      tv.tv_sec = CLI_TELNET_SEND_TIMEOUT_MS / 1000;
+      tv.tv_usec = (CLI_TELNET_SEND_TIMEOUT_MS % 1000) * 1000;
       (void)setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd));
-      (void)setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+      (void)setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#ifdef SO_NOSIGPIPE
+      int32_t nosig = 1;
+      (void)setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &nosig, sizeof(nosig));
+#endif
     }
 #endif
     result = (int32_t)client;
@@ -291,22 +301,23 @@ int8_t cli_telnet_handler(cli_telnet_ctx_struct_t *ctx) {
 
   if (ctx->rx_pos >= ctx->rx_len) {
     cli_transport_buflen_t room = (cli_transport_buflen_t)(sizeof(ctx->rx_buf) - ctx->rx_len);
-    if (room > 0) {
+    int32_t ready = 0;
 
+    if (room > 0) {
+      ready = cli_telnet_wait_readable((cli_sock_t)ctx->fd, (uint32_t)CLI_TRANSPORT_POLL_MS);
+      if (ready < 0) {
+        result = CLI_ERR;
+      }
+    }
+
+    if (ready > 0) {
       cli_transport_ret_t received =
           CLI_TELNET_SOCK_READ((cli_sock_t)ctx->fd, &ctx->rx_buf[ctx->rx_len], room);
 
       if (received < 0) {
-#if ENV_IS_WINDOWS
-        int32_t error = WSAGetLastError();
-        if (!(error == WSAETIMEDOUT || error == WSAEWOULDBLOCK || error == WSAEINTR)) {
+        if (!cli_telnet_is_interrupted()) {
           result = CLI_ERR;
         }
-#else
-        if (!(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-          result = CLI_ERR;
-        }
-#endif
       } else if (received == 0) {
         result = CLI_ERR;
       } else {
@@ -357,30 +368,66 @@ static int32_t cli_telnet_winsock_init(void) {
 }
 #endif
 
-static int32_t cli_set_recv_timeout_ms(cli_sock_t sock, int32_t timeout_ms) {
-  int32_t rc = 0;
+/**
+ * @brief Return whether the last socket call was interrupted by a signal.
+ *
+ * @return @c true when the call should simply be repeated.
+ */
+static bool cli_telnet_is_interrupted(void) {
+#if ENV_IS_WINDOWS
+  return WSAGetLastError() == WSAEINTR;
+#else
+  return errno == EINTR;
+#endif
+}
+
+/**
+ * @brief Wait until @p sock is readable or @p timeout_ms elapses.
+ *
+ * @param[in] sock        Connected socket.
+ * @param[in] timeout_ms  Maximum wait in milliseconds.
+ *
+ * @return 1 if readable, 0 on timeout or signal interruption, -1 on error.
+ */
+static int32_t cli_telnet_wait_readable(cli_sock_t sock, uint32_t timeout_ms) {
+  int32_t ready;
 
 #if ENV_IS_WINDOWS
-  DWORD ms = (DWORD)timeout_ms;
-  if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, (int32_t)sizeof(ms)) != 0) {
-    rc = -1;
-  }
-#else
+  /* WinSock's fd_set is a list of handles (no FD_SETSIZE bitmap limit); nfds is ignored. */
+  fd_set rfds;
   struct timeval tv;
-  tv.tv_sec = timeout_ms / 1000;
-  tv.tv_usec = (timeout_ms % 1000) * 1000;
-  if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, (socklen_t)sizeof(tv)) != 0) {
-    rc = -1;
+
+  FD_ZERO(&rfds);
+  FD_SET(sock, &rfds);
+  tv.tv_sec = (long)(timeout_ms / 1000U);
+  tv.tv_usec = (long)((timeout_ms % 1000U) * 1000U);
+  ready = select(0, &rfds, NULL, NULL, &tv);
+#else
+  /* poll() works for any descriptor number; select() is undefined at fd >= FD_SETSIZE. */
+  struct pollfd pfd;
+
+  pfd.fd = sock;
+  pfd.events = POLLIN;
+  pfd.revents = 0;
+  ready = poll(&pfd, 1, (int)timeout_ms);
+  if (ready > 0 && (pfd.revents & POLLNVAL) != 0) {
+    ready = -1;
+    errno = EBADF;
   }
 #endif
+  if (ready < 0 && cli_telnet_is_interrupted()) {
+    ready = 0;
+  }
 
-  return rc;
+  return (ready > 0) ? 1 : ((ready == 0) ? 0 : -1);
 }
 
 /**
  * @brief Transmit all bytes over the socket, blocking until complete.
  *
- * Used for protocol negotiation and escaping IAC bytes.
+ * Used for protocol negotiation and escaping IAC bytes. Signal interruptions
+ * are retried; a send timeout (@c CLI_TELNET_SEND_TIMEOUT_MS) or a closed peer
+ * is an error.
  *
  * @param[in] sock  Socket file descriptor.
  * @param[in] buf   Data buffer to transmit.
@@ -394,11 +441,14 @@ static cli_transport_ret_t cli_telnet_send_all(cli_sock_t sock, const uint8_t *b
   bool error = false;
 
   while (sent < len && !error) {
-    int32_t rc = CLI_TELNET_SOCK_WRITE(sock, &buf[sent], len - sent);
+    int32_t rc = (int32_t)CLI_TELNET_SOCK_WRITE(sock, &buf[sent], len - sent);
+    if (rc < 0 && cli_telnet_is_interrupted()) {
+      continue;
+    }
     if (rc <= 0) {
       error = true;
     } else {
-      sent += rc;
+      sent += (cli_transport_buflen_t)rc;
     }
   }
 
@@ -412,7 +462,41 @@ static cli_transport_ret_t cli_telnet_send_all(cli_sock_t sock, const uint8_t *b
 /* Telnet Protocol Helpers --------------------------------------------------------------*/
 
 /**
+ * @brief Apply a peer's answer or request for one option we track (RFC 1143).
+ *
+ * @param[in,out] ctx      Telnet context (pending request bits).
+ * @param[in,out] enabled  The option's current state.
+ * @param[in]     bit      The option's @c TELNET_PENDING_* bit.
+ * @param[in]     enable   @c true for DO / WILL, @c false for DONT / WONT.
+ *
+ * @return @c true when a reply must be sent (a new request that changes the state);
+ *         answers to our own pending requests and redundant requests get none.
+ */
+static bool cli_telnet_option_update(cli_telnet_ctx_struct_t *ctx, bool *enabled, uint8_t bit,
+                                     bool enable) {
+  bool reply = false;
+
+  if ((ctx->pending & bit) != 0U) {
+    /* Answer to our request: accept the peer's decision, never acknowledge it. */
+    ctx->pending = (uint8_t)(ctx->pending & (uint8_t)~bit);
+    *enabled = enable;
+  } else if (*enabled != enable) {
+    /* The peer asks for a change: agree, and confirm it. */
+    *enabled = enable;
+    reply = true;
+  } else {
+    /* Already in the requested state: no reply (prevents negotiation loops). */
+  }
+
+  return reply;
+}
+
+/**
  * @brief Respond to an incoming IAC option negotiation request.
+ *
+ * ECHO and SGA (performed here) and NAWS (performed by the peer) are supported
+ * and tracked; every other option stays disabled: a request to enable it is
+ * refused, a request to disable it needs no reply.
  *
  * @param[in] ctx   Telnet context carrying the socket fd.
  * @param[in] verb  Telnet verb byte.
@@ -420,68 +504,37 @@ static cli_transport_ret_t cli_telnet_send_all(cli_sock_t sock, const uint8_t *b
  */
 static void cli_telnet_respond(cli_telnet_ctx_struct_t *ctx, uint8_t verb, uint8_t opt) {
   uint8_t response[3];
-  bool send_response = true;
+  bool send_response = false;
+  bool enable = (verb == TELNET_DO || verb == TELNET_WILL);
 
   response[0] = TELNET_IAC;
 
   switch (verb) {
   case TELNET_DO:
-    if (opt == TELNET_OPT_ECHO) {
-      if (ctx->local_echo) {
-        send_response = false;
-      } else {
-        ctx->local_echo = true;
-        response[1] = TELNET_WILL;
-      }
-    } else if (opt == TELNET_OPT_SGA) {
-      if (ctx->local_sga) {
-        send_response = false;
-      } else {
-        ctx->local_sga = true;
-        response[1] = TELNET_WILL;
-      }
-    } else {
-      response[1] = TELNET_WONT;
-    }
-    break;
   case TELNET_DONT:
-    if (opt == TELNET_OPT_ECHO && ctx->local_echo) {
-      ctx->local_echo = false;
-      response[1] = TELNET_WONT;
-    } else if (opt == TELNET_OPT_SGA && ctx->local_sga) {
-      ctx->local_sga = false;
-      response[1] = TELNET_WONT;
+    /* Options this end would perform. */
+    if (opt == TELNET_OPT_ECHO) {
+      send_response = cli_telnet_option_update(ctx, &ctx->local_echo, TELNET_PENDING_ECHO, enable);
+    } else if (opt == TELNET_OPT_SGA) {
+      send_response = cli_telnet_option_update(ctx, &ctx->local_sga, TELNET_PENDING_SGA, enable);
     } else {
-      send_response = false;
+      send_response = enable; /* refuse DO; DONT for a disabled option needs no reply */
+      enable = false;
     }
+    response[1] = enable ? TELNET_WILL : TELNET_WONT;
     break;
   case TELNET_WILL:
-    if (opt == TELNET_OPT_NAWS) {
-      if (ctx->remote_naws) {
-        send_response = false;
-      } else {
-        ctx->remote_naws = true;
-        response[1] = TELNET_DO;
-      }
-    } else if (opt == TELNET_OPT_LINEMODE && ctx->remote_linemode_rejected) {
-      send_response = false;
-    } else {
-      if (opt == TELNET_OPT_LINEMODE) {
-        ctx->remote_linemode_rejected = true;
-      }
-      response[1] = TELNET_DONT;
-    }
-    break;
   case TELNET_WONT:
-    if (opt == TELNET_OPT_NAWS && ctx->remote_naws) {
-      ctx->remote_naws = false;
-      response[1] = TELNET_DONT;
+    /* Options the peer would perform. */
+    if (opt == TELNET_OPT_NAWS) {
+      send_response = cli_telnet_option_update(ctx, &ctx->remote_naws, TELNET_PENDING_NAWS, enable);
     } else {
-      send_response = false;
+      send_response = enable; /* refuse WILL (incl. LINEMODE); WONT needs no reply */
+      enable = false;
     }
+    response[1] = enable ? TELNET_DO : TELNET_DONT;
     break;
   default:
-    send_response = false;
     break;
   }
 
@@ -525,6 +578,7 @@ static bool cli_telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, 
       ctx->state = TELNET_STATE_VERB;
     } else if (byte == TELNET_SB) {
       ctx->state = TELNET_STATE_SB;
+      ctx->sb_len = 0U;
     } else {
       ctx->state = TELNET_STATE_NORMAL;
     }
@@ -538,11 +592,25 @@ static bool cli_telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, 
   case TELNET_STATE_SB:
     if (byte == TELNET_IAC) {
       ctx->state = TELNET_STATE_SB_IAC;
+    } else if (++ctx->sb_len > CLI_TELNET_MAX_SB_LEN) {
+      /* No IAC SE in sight (broken client): give up on the block so input is not
+       * swallowed forever. The remaining bytes are treated as normal data. */
+      ctx->state = TELNET_STATE_NORMAL;
+    } else {
+      /* Sub-negotiation payload (e.g. NAWS size) is not used. */
     }
     break;
 
   case TELNET_STATE_SB_IAC:
-    ctx->state = (byte == TELNET_SE) ? TELNET_STATE_NORMAL : TELNET_STATE_SB;
+    if (byte == TELNET_SE) {
+      ctx->state = TELNET_STATE_NORMAL;
+    } else if (byte == TELNET_IAC) {
+      ctx->state = TELNET_STATE_SB; /* escaped 0xFF inside the payload */
+    } else {
+      /* IAC <command> inside SB: the block was never terminated; resume normal parsing. */
+      ctx->state = TELNET_STATE_IAC;
+      stored = cli_telnet_process_byte(ctx, byte, out);
+    }
     break;
 
   default:

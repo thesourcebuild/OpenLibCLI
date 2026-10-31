@@ -73,6 +73,16 @@ extern "C" {
 /** @brief Operation failed or the peer disconnected. */
 #define CLI_TELNET_ERR (-1)
 
+#ifndef CLI_TELNET_SEND_TIMEOUT_MS
+/** @brief A send blocked for this long (client not reading) ends the session. */
+#define CLI_TELNET_SEND_TIMEOUT_MS 5000
+#endif
+
+#ifndef CLI_TELNET_MAX_SB_LEN
+/** @brief Longest accepted sub-negotiation payload; longer (or unterminated) ones are dropped. */
+#define CLI_TELNET_MAX_SB_LEN 64U
+#endif
+
 /*=======================================================================================
  * Public Macros
  *=======================================================================================*/
@@ -93,11 +103,12 @@ typedef struct {
   int32_t fd;                    /**< Connected socket file descriptor. */
   uint8_t state;                 /**< IAC parser state. */
   uint8_t verb;                  /**< IAC verb byte being processed. */
+  uint16_t sb_len;               /**< Bytes consumed in the current sub-negotiation. */
   bool negotiated;               /**< True once initial option negotiation has been sent. */
-  bool local_echo;               /**< True when this endpoint has enabled local echo. */
-  bool local_sga;                /**< True when this endpoint has enabled suppress-go-ahead. */
-  bool remote_naws;              /**< True when the remote endpoint has enabled NAWS. */
-  bool remote_linemode_rejected; /**< True once remote linemode has been rejected. */
+  bool local_echo;               /**< True once the peer agreed that this end echoes. */
+  bool local_sga;                /**< True once the peer agreed to suppress-go-ahead here. */
+  bool remote_naws;              /**< True once the peer agreed to send its window size. */
+  uint8_t pending;               /**< Our option requests still awaiting an answer. */
   uint8_t rx_buf[256];           /**< Receive staging buffer. */
   uint16_t rx_len;               /**< Bytes currently stored in @c rx_buf. */
   uint16_t rx_pos;               /**< Read cursor within @c rx_buf. */
@@ -121,8 +132,7 @@ typedef struct {
 /**
  * @brief Initialise a Telnet transport context and fill the vtable.
  *
- * Zeroes @p ctx, stores @p fd, sets @c SO_RCVTIMEO on the socket
- * (@c CLI_TRANSPORT_POLL_MS), and wires the @c available, @c read,
+ * Zeroes @p ctx, stores @p fd, and wires the @c available, @c read,
  * @c write, and @c flush callbacks into @p transport.
  *
  * @param[out] ctx        Caller-allocated context (must outlive the session).
@@ -154,8 +164,8 @@ int32_t cli_telnet_listen(uint16_t port);
 /**
  * @brief Accept one client from a Telnet listening socket.
  *
- * Configures @c TCP_NODELAY and @c SO_RCVTIMEO
- * (@c CLI_TRANSPORT_POLL_MS) on the accepted client socket.
+ * Configures @c TCP_NODELAY and @c SO_SNDTIMEO (@c CLI_TELNET_SEND_TIMEOUT_MS)
+ * on the accepted client socket; on macOS also @c SO_NOSIGPIPE.
  *
  * @param[in] listen_fd  Fd returned by @c cli_telnet_listen().
  *
@@ -166,8 +176,8 @@ int32_t cli_telnet_accept(int32_t listen_fd);
 /**
  * @brief Read raw socket data and process IAC negotiation.
  *
- * Calls @c recv() on the socket (which has @c SO_RCVTIMEO set to
- * @c CLI_TRANSPORT_POLL_MS), runs the telnet IAC state machine, and
+ * Waits up to @c CLI_TRANSPORT_POLL_MS for the socket to become readable,
+ * reads the available bytes, runs the telnet IAC state machine, and
  * appends decoded user bytes to the internal rx buffer. The transport's
  * @c available callback calls this automatically; applications normally do
  * not need to call it directly.

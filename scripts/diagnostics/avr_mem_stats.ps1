@@ -14,7 +14,15 @@ function Invoke-Checked {
         [string[]]$Arguments
     )
 
-    & $Exe @Arguments
+    # Windows PowerShell turns any stderr line of a native command (e.g. a compiler
+    # warning) into a terminating error under "Stop"; the exit code decides failure.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Exe @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+    } finally {
+        $ErrorActionPreference = $previous
+    }
     if ($LASTEXITCODE -ne 0) {
         throw ("Command failed ({0}): {1} {2}" -f $LASTEXITCODE, $Exe, ($Arguments -join " "))
     }
@@ -68,29 +76,15 @@ $avrConfig = @(
     "-DCLI_ENABLE_MODE_NAMES=0"   # not defined in embedded config
 )
 
-$probeC = @"
-#define ARDUINO $ArduinoVersion
-#define __AVR__ 1
-#ifndef CLI_MAX_COMMANDS
-#define CLI_MAX_COMMANDS 12
-#endif
-#include "cli.h"
-
-char probe_cli_t[sizeof(cli_t)];
-char probe_cli_cmd_t[sizeof(cli_cmd_t)];
-char probe_cmd_pool[sizeof(cli_cmd_t) * CLI_MAX_COMMANDS];
-char probe_instances[sizeof(cli_t)];
-"@
-
-$probeCPath = Join-Path $buildDir "avr_size_probe.c"
+# The probe source is tracked in the repository (single source of truth for the type names).
+$probeCPath = Join-Path $repoRoot "scripts\diagnostics\avr_size_probe.c"
 $probeOPath = Join-Path $buildDir "avr_size_probe.o"
 $serialOPath = Join-Path $buildDir "avr_cli_serial_app.o"
 $demoOPath = Join-Path $buildDir "avr_demo_config.o"
+$parseOPath = Join-Path $buildDir "avr_cli_args_parse.o"
 $stubCPath = Join-Path $buildDir "avr_size_stub.c"
 $stubOPath = Join-Path $buildDir "avr_size_stub.o"
 $serialElfPath = Join-Path $buildDir "avr_cli_serial_app.elf"
-
-Set-Content -Path $probeCPath -Value $probeC -Encoding ascii
 
 Invoke-Checked -Exe $gcc -Arguments (
     @("-mmcu=$Mcu", "-Os", "-DARDUINO=$ArduinoVersion", "-D__AVR__=1", "-Icli") +
@@ -122,33 +116,42 @@ Invoke-Checked -Exe $gcc -Arguments (
     @("-c", "examples/shared/cli_demo_setup.c", "-o", $demoOPath)
 )
 
+# Number parsing / formatting helpers (used by the demo commands) are a separate library unit.
+Invoke-Checked -Exe $gcc -Arguments (
+    @("-mmcu=$Mcu", "-Os", "-ffunction-sections", "-fdata-sections",
+      "-DARDUINO=$ArduinoVersion", "-D__AVR__=1", "-Icli") +
+    $avrConfig +
+    @("-c", "cli/utils/cli_args_parse.c", "-o", $parseOPath)
+)
+
 $stubC = @"
 #include "cli_serial.h"
 #include <stdint.h>
 
-static int16_t stub_available(void *ctx) {
+static cli_transport_ret_t stub_available(void *ctx) {
     (void)ctx;
     return 0;
 }
 
-static int16_t stub_read(void *ctx) {
+static cli_transport_ret_t stub_read(void *ctx) {
     (void)ctx;
     return 0;
 }
 
-static int16_t stub_write(void *ctx, const uint8_t *buf, uint16_t len) {
+static cli_transport_ret_t stub_write(void *ctx, const uint8_t *buf, cli_transport_buflen_t len) {
     (void)ctx;
     (void)buf;
-    return len;
+    return (cli_transport_ret_t)len;
 }
 
-static int16_t stub_flush(void *ctx) {
+static cli_transport_ret_t stub_flush(void *ctx) {
     (void)ctx;
     return 0;
 }
 
 int main(void) {
-    cli_transport_t transport;
+    cli_transport_struct_t transport;
+    transport.kind = CLI_TRANSPORT_SERIAL;
     transport.available = stub_available;
     transport.read = stub_read;
     transport.write = stub_write;
@@ -175,7 +178,7 @@ Invoke-Checked -Exe $gcc -Arguments (
 
 Invoke-Checked -Exe $gcc -Arguments @(
         "-mmcu=$Mcu", "-Os", "-Wl,--gc-sections",
-    $serialOPath, $demoOPath, $stubOPath, "-o", $serialElfPath
+    $serialOPath, $demoOPath, $parseOPath, $stubOPath, "-o", $serialElfPath
 )
 
 $serialSizeRaw = & $size -B $serialElfPath

@@ -170,6 +170,18 @@ extern "C" {
 #define CLI_ENABLE_PIPE_FILTER 1
 #endif
 
+#ifndef CLI_ENABLE_PRINT_TRANSPORT_CB
+/**< Compile in cli_set_print_transport_cb() (per-line output callback). Needs the
+       CLI_MAX_OUTPUT_BUF line buffer even when pipe filters are omitted. */
+#define CLI_ENABLE_PRINT_TRANSPORT_CB 1
+#endif
+
+#ifndef CLI_MAX_EXEC_DEPTH
+/**< Maximum commands executing at once (a command handler calling cli_exec() counts as a
+       second level). Guards against unbounded recursion; costs no memory. */
+#define CLI_MAX_EXEC_DEPTH 4
+#endif
+
 /*=======================================================================================
  *  Transport / Timing
  *=======================================================================================*/

@@ -29,7 +29,7 @@
 #include <windows.h>
 #include <conio.h>
 #elif ENV_IS_UNIX_LIKE
-#include <sys/select.h>
+#include <poll.h>
 #include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
@@ -172,11 +172,11 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
       Sleep(1);
     }
 #else
-    struct timeval tv = {1, 0};
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(STDIN_FILENO, &rfds);
-    select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+    struct pollfd pfd;
+    pfd.fd = STDIN_FILENO;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    (void)poll(&pfd, 1, 1000);
 #endif
     rc = cli_session_engine(cli);
     if (rc != CLI_OK) {

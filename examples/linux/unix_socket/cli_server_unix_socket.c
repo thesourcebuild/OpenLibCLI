@@ -39,7 +39,9 @@
 #include <string.h>
 
 #if ENV_IS_UNIX_LIKE
+#include <errno.h>
 #include <pthread.h>
+#include <poll.h>
 #include <signal.h>
 #include <termios.h>
 #include <unistd.h>
@@ -90,6 +92,7 @@ typedef struct {
 static demo_app_data_struct_t s_app; /**< Per-session application data. */
 static struct termios s_orig_term;
 static int32_t s_raw_mode;
+static volatile sig_atomic_t s_stop; /**< Set by SIGINT / SIGTERM to shut the server down. */
 #endif
 
 /*=======================================================================================
@@ -109,6 +112,7 @@ static void client_restore_term(void);
 static void run_client(const char *path);
 static void print_usage(const char *prog);
 static int8_t cli_server_loop(cli_struct_t *cli);
+static void on_stop_signal(int sig);
 #endif
 
 /*=======================================================================================
@@ -168,15 +172,33 @@ int main(int argc, char *argv[]) {
  */
 static int8_t cli_server_loop(cli_struct_t *cli) {
   cli_start(cli);
-  int8_t rc;
-  while (1) {
+  int8_t rc = CLI_OK;
+  while (rc == CLI_OK && !s_stop) {
+    /* Sleep until input arrives (or the poll interval elapses for timers), instead of
+     * spinning on the non-blocking available() check. */
+    struct pollfd pfd;
+    pfd.fd = ((cli_unix_socket_ctx_struct_t *)cli->transport.ctx)->fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    (void)poll(&pfd, 1, CLI_TRANSPORT_POLL_MS);
+
     rc = cli_session_engine(cli);
-    if (rc != CLI_OK) {
-      cli->session_state = CLI_SESSION_STOP;
-      break;
-    }
   }
+  if (rc == CLI_OK) {
+    rc = CLI_ERR_QUIT; /* stopped by signal */
+  }
+  cli->session_state = CLI_SESSION_STOP;
   return rc;
+}
+
+/**
+ * @brief SIGINT / SIGTERM handler: request a clean server shutdown.
+ *
+ * @param[in] sig  Signal number (unused).
+ */
+static void on_stop_signal(int sig) {
+  (void)sig;
+  s_stop = 1;
 }
 
 /**
@@ -228,7 +250,16 @@ static void setup_session(cli_struct_t *cli, uint32_t session_id) {
  * @param[in] path  UNIX socket filesystem path.
  */
 static void run_server(const char *path) {
+  struct sigaction sa;
+
   signal(SIGPIPE, SIG_IGN);
+
+  /* No SA_RESTART: a blocking accept() returns EINTR so the loop can shut down. */
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = on_stop_signal;
+  sigemptyset(&sa.sa_mask);
+  (void)sigaction(SIGINT, &sa, NULL);
+  (void)sigaction(SIGTERM, &sa, NULL);
 
   int32_t srv_fd = cli_unix_listen(path);
   if (srv_fd < 0) {
@@ -244,19 +275,22 @@ static void run_server(const char *path) {
 
     uint32_t session_num = 0;
 
-    for (;;) {
+    while (!s_stop) {
       printf("Waiting for connection ...\n");
       fflush(stdout);
 
       int32_t conn_fd = cli_unix_accept(srv_fd);
       if (conn_fd < 0) {
-        perror("cli_unix_accept");
+        if (errno != EINTR) {
+          perror("cli_unix_accept");
+          cli_sleep_ms(100U); /* back off on persistent errors (e.g. EMFILE) */
+        }
         continue;
       }
 
-      printf("Client connected (session %d)\n", ++session_num);
+      printf("Client connected (session %u)\n", (unsigned)++session_num);
 
-      static cli_unix_socket_ctx_t sock_ctx;
+      static cli_unix_socket_ctx_struct_t sock_ctx;
       static cli_transport_struct_t transport;
       cli_unix_socket_init(&sock_ctx, &transport, conn_fd);
 
@@ -265,11 +299,15 @@ static void run_server(const char *path) {
 
       setup_session(&demo_cli, session_num);
       int8_t rc = cli_server_loop(&demo_cli);
-      printf("Session %d ended (rc=%d)\n", session_num, rc);
+      printf("Session %u ended (rc=%d)\n", (unsigned)session_num, rc);
 
       cli_done(&demo_cli);
       cli_unix_close(conn_fd);
     }
+
+    cli_unix_close(srv_fd);
+    cli_unix_unlink(path);
+    printf("Server stopped; removed %s\n", path);
   }
 }
 
@@ -281,7 +319,7 @@ static void run_server(const char *path) {
  * @return Always @c NULL.
  */
 static void *relay_reader_fn(void *arg) {
-  relay_t *relay = (relay_t *)arg;
+  relay_struct_t *relay = (relay_struct_t *)arg;
   uint8_t buf[512];
   int32_t received;
 
@@ -302,7 +340,7 @@ static void *relay_reader_fn(void *arg) {
  * @return Always @c NULL.
  */
 static void *relay_writer_fn(void *arg) {
-  relay_t *relay = (relay_t *)arg;
+  relay_struct_t *relay = (relay_struct_t *)arg;
   uint8_t byte;
 
   while (!relay->done) {
@@ -326,7 +364,9 @@ static void client_raw_mode(void) {
     struct termios term;
     if (tcgetattr(STDIN_FILENO, &s_orig_term) == 0) {
       term = s_orig_term;
-      term.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE);
+      /* ISIG off: Ctrl-C / Ctrl-Z go to the remote CLI instead of killing this client with
+       * the terminal still in no-echo mode. */
+      term.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE | ISIG);
       term.c_cc[VMIN] = 1;
       term.c_cc[VTIME] = 0;
       if (tcsetattr(STDIN_FILENO, TCSANOW, &term) == 0) {
@@ -364,18 +404,25 @@ static void run_client(const char *path) {
     printf("Connected. Type 'exit' or 'quit' to end the session.\n\n");
     fflush(stdout);
 
-    relay_t relay = {fd, 0};
+    relay_struct_t relay = {fd, 0};
     pthread_t reader_thread;
     pthread_t writer_thread;
 
     client_raw_mode();
-    pthread_create(&reader_thread, NULL, relay_reader_fn, &relay);
-    pthread_create(&writer_thread, NULL, relay_writer_fn, &relay);
-
-    pthread_join(reader_thread, NULL);
-    relay.done = 1;
-    pthread_cancel(writer_thread);
-    pthread_join(writer_thread, NULL);
+    if (pthread_create(&reader_thread, NULL, relay_reader_fn, &relay) != 0) {
+      perror("pthread_create");
+    } else {
+      if (pthread_create(&writer_thread, NULL, relay_writer_fn, &relay) != 0) {
+        perror("pthread_create");
+        shutdown(fd, SHUT_RDWR); /* unblock the reader */
+        pthread_join(reader_thread, NULL);
+      } else {
+        pthread_join(reader_thread, NULL);
+        relay.done = 1;
+        pthread_cancel(writer_thread);
+        pthread_join(writer_thread, NULL);
+      }
+    }
     client_restore_term();
 
     cli_unix_close(fd);

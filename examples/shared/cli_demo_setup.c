@@ -14,6 +14,7 @@
 
 #include <cli_version.h>
 #include <cli_env_detect.h>
+#include <utils/cli_args_parse.h>
 #include "cli_demo_setup.h"
 
 #if defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__) || defined(WIN32)
@@ -50,7 +51,7 @@
  * Private Function Prototypes
  *=======================================================================================*/
 
-static int8_t demo_periodic_cb(const cli_struct_t *cli);
+static int8_t demo_periodic_cb(cli_struct_t *cli);
 
 /*=======================================================================================
  * External Data Variables
@@ -242,17 +243,18 @@ int8_t cmd_arithmetic(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const
 int8_t cmd_add(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
   (void)cmd;
   int8_t rc = CLI_ERR;
+  int32_t a;
+  int32_t b;
 
   if (argc < 3 || argc > 4) {
     cli_println(cli, "Usage: add <a> <b>  or  add <a> + <b>");
   } else if (argc == 4 && strcmp(argv[2], "+") != 0) {
     cli_println(cli, "Usage: add <a> + <b>");
+  } else if (!parse_i32(argv[1], &a) || !parse_i32(argv[argc - 1], &b)) {
+    /* The second operand is the last token: "add 3 4" and "add 3 + 4". */
+    cli_println(cli, "Operands must be integers in [%ld, %ld]", (long)INT32_MIN, (long)INT32_MAX);
   } else {
-    int32_t a;
-    int32_t b;
-    cli_sscanf(argv[1], "%u", &a);
-    cli_sscanf(argv[2], "%u", &b);
-    cli_println(cli, "%d", a + b);
+    cli_println(cli, "%lld", (long long)a + (long long)b); /* 64-bit: cannot overflow */
     rc = CLI_OK;
   }
 
@@ -262,17 +264,17 @@ int8_t cmd_add(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *
 int8_t cmd_sub(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
   (void)cmd;
   int8_t rc = CLI_ERR;
+  int32_t a;
+  int32_t b;
 
   if (argc < 3 || argc > 4) {
     cli_println(cli, "Usage: sub <a> <b>  or  sub <a> - <b>");
   } else if (argc == 4 && strcmp(argv[2], "-") != 0) {
     cli_println(cli, "Usage: sub <a> - <b>");
+  } else if (!parse_i32(argv[1], &a) || !parse_i32(argv[argc - 1], &b)) {
+    cli_println(cli, "Operands must be integers in [%ld, %ld]", (long)INT32_MIN, (long)INT32_MAX);
   } else {
-    int32_t a;
-    int32_t b;
-    cli_sscanf(argv[1], "%u", &a);
-    cli_sscanf(argv[2], "%u", &b);
-    cli_println(cli, "%d", a - b);
+    cli_println(cli, "%lld", (long long)a - (long long)b); /* 64-bit: cannot overflow */
     rc = CLI_OK;
   }
 
@@ -296,7 +298,7 @@ void cli_sleep_ms(uint32_t ms) {
  * Private Functions
  *=======================================================================================*/
 
-static int8_t demo_periodic_cb(const cli_struct_t *cli) {
+static int8_t demo_periodic_cb(cli_struct_t *cli) {
   demo_app_data_struct_t *app = (demo_app_data_struct_t *)cli_get_userdata(cli);
 
   if (app) {

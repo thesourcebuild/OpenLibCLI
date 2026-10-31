@@ -26,7 +26,7 @@
  *                    CLI_PRIV_UNPRIVILEGED,
  *                    CLI_MODE_ANY, "Show version");
  *
- *   cli_unix_socket_ctx_t us_ctx;
+ *   cli_unix_socket_ctx_struct_t us_ctx;
  *   cli_transport_struct_t       tp;
  *   int32_t               conn = cli_unix_accept(listen_fd);
  *   cli_unix_socket_init(&us_ctx, &tp, conn);
@@ -113,8 +113,10 @@ typedef struct {
 /**
  * @brief Create a listening UNIX domain socket at @p path.
  *
- * Any stale socket file at @p path is removed before binding so that a
- * crashed server can restart without manual cleanup.
+ * A stale socket file left by a crashed server is removed before binding so
+ * the server can restart without manual cleanup. A path that is not a socket,
+ * or a socket another server is still accepting on, is left untouched and the
+ * call fails (@c errno = @c ENOTSOCK / @c EADDRINUSE).
  *
  * @param[in] path  Filesystem path for the socket.
  *
@@ -148,7 +150,7 @@ int32_t cli_unix_connect(const char *path);
  *                        (@c flush is set to @c NULL).
  * @param[in]  fd         Connected socket fd.
  */
-void cli_unix_socket_init(cli_unix_socket_ctx_t *ctx, cli_transport_struct_t *transport,
+void cli_unix_socket_init(cli_unix_socket_ctx_struct_t *ctx, cli_transport_struct_t *transport,
                           int32_t fd);
 
 /**

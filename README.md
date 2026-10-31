@@ -513,6 +513,8 @@ cli_set_mode_name(cli, MODE_INTERFACE, "config-if");
 cli_set_mode(cli, MODE_INTERFACE);
 ```
 
+Navigation is stack based: entering a mode (or a submenu) saves the current mode and submenu, and the built-in `exit` returns to exactly that level. Calling `cli_set_mode()` with a mode that is already on the stack (for example `end` → `CLI_MODE_ENABLE`) returns to that level. Leaving `CLI_MODE_ENABLE` drops privilege to `CLI_PRIV_USER`; at the login floor `exit` applies the configured exit policy. The stack holds up to `CLI_MAX_CONTEXT_DEPTH` levels — `cli_set_mode()` returns `CLI_ERR_NOMEM` when it is full.
+
 ---
 
 ### Output and Pipe Filters
@@ -541,7 +543,28 @@ Interface GigE0/2  status up
 
 router# show interfaces | exclude up
 Interface GigE0/1  status down
+
+router# show interfaces | inc "status up"
+Interface GigE0/0  status up
+Interface GigE0/2  status up
 ```
+
+Filter keywords are `grep` / `include`, `exclude`, `begin` and `count`, and may be abbreviated (`| inc`, `| ex`). An unknown keyword or a missing pattern is reported as an error and the command is not run. A pattern written as one double-quoted string may contain spaces and `|`.
+
+#### Quoted arguments
+
+Arguments containing spaces, `|` or `?` can be written in double quotes; inside quotes `\"` and `\\` stand for a literal quote and backslash:
+
+```text
+router# hostname "core switch 1"
+router# echo "a|b" "what?"
+```
+
+A line with an unterminated quote or more than `CLI_MAX_ARGS - 1` tokens is rejected with an error instead of being executed partially.
+
+#### Inline help
+
+`sh?` (no space) lists the commands that start with `sh`; `show ?` (with a space) lists what can follow `show`. Inside double quotes `?` is ordinary text.
 
 ---
 
@@ -549,23 +572,33 @@ Interface GigE0/1  status down
 
 ```c
 // Option A — local table (up to CLI_MAX_USERS entries)
-cli_add_user(cli, "admin", "admin");
-cli_add_user(cli, "guest", "guest");
+cli_add_user(cli, "admin", "admin", CLI_PRIV_PRIVILEGED);
+cli_add_user(cli, "guest", "guest", CLI_PRIV_USER);
 cli_require_authorization(cli, true);
 
 // Option B — custom callback (overrides the local table)
-static int my_auth(const char *user, const char *pass)
+static int8_t my_auth(cli_struct_t *cli, const char *user, const char *pass)
 {
-    if (strcmp(user, "admin") == 0 && strcmp(pass, getenv("CLI_PASS")) == 0)
+    const char *expected = getenv("CLI_PASS");
+    if (expected != NULL && strcmp(user, "admin") == 0 && strcmp(pass, expected) == 0) {
+        cli_set_privilege(cli, CLI_PRIV_PRIVILEGED); // optional: log in privileged
         return CLI_OK;
+    }
     return CLI_ERR_AUTH;
 }
 cli_set_authorization_cb(cli, my_auth);
 cli_require_authorization(cli, true);
 
-// Enable secret (for 'enable' privilege escalation)
+// Enable secret (for 'enable' privilege escalation); CLI_ERR if longer than
+// CLI_MAX_ENABLE_SECRET_LEN - 1 characters (the secret is never silently shortened)
 cli_set_enable_secret(cli, "cisco");
 ```
+
+Passwords in the local table and the enable secret are kept in plain text inside the session and compared in constant time; the typed password is wiped from memory after each attempt. To verify against hashes instead, use `cli_set_authorization_cb()` / `cli_set_enable_privilege_cb()`.
+
+The session starts every login at `CLI_PRIV_USER`; a callback grants more by calling `cli_set_privilege()` before returning `CLI_OK`. Users at `CLI_PRIV_PRIVILEGED` or above start in privileged exec. After three failed logins — or three consecutive wrong enable secrets — the `cli_set_auth_failure_mode()` policy applies: close the session, or lock input out for `cli_set_auth_lockout_duration()` seconds (input typed during a lockout is discarded; without a time source the session is closed instead). Cursor keys and history recall are ignored while a username or password is being typed, and command history is cleared whenever the session restarts or re-authenticates.
+
+> **API change:** `cli_auth_fn` and `cli_enable_fn` now receive the session (`cli_struct_t *cli`) as their first parameter, and `cli_print_v_fn` receives the print kind and returns the character count.
 
 ---
 
@@ -608,7 +641,9 @@ if (result == CLI_OK) {
 }
 ```
 
-Copies the string into the internal input buffer, runs the full pipeline (trim, tokenize, resolve, callback), and resets the buffer.
+Runs the full pipeline (trim, tokenize, resolve, callback) on the string. No extra buffer is used: the string is copied into the free part of the session's input buffer, after the line the user may be typing (or a password being entered) and after the lines of any commands still executing — none of those are disturbed. A string that does not fit in the remaining space is rejected with `CLI_ERR_NOMEM`; it is never executed truncated. Programmatic commands are not added to the user's history.
+
+`cli_exec()` may be called from inside a command handler (up to `CLI_MAX_EXEC_DEPTH` nested commands). The nested command's output goes through the outer command's pipe filter, so the nested line itself cannot contain a `|` filter.
 
 #### `cli_exec_argv` — Execute pre-parsed arguments
 
@@ -617,7 +652,7 @@ const char *args[] = {"show", "version"};
 int8_t result = cli_exec_argv(&s_cli, args, 2);
 ```
 
-Joins `argv[0..argc-1]` with spaces and calls `cli_exec()`. A thin convenience wrapper when you already have tokenized input.
+Joins `argv[0..argc-1]` with spaces and calls `cli_exec()`. Entries that are empty or contain spaces, quotes, `|` or `?` are quoted automatically, so every entry reaches the handler as exactly one argument.
 
 #### No-op transport (silent execution)
 
