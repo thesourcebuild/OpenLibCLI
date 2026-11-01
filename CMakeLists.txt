@@ -11,7 +11,11 @@ endif()
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+# Before include(CTest), which would otherwise define BUILD_TESTING as ON first.
+option(BUILD_TESTING "Build the test suite" OFF)
 include(CTest)
+# Before the targets: their install include directories use CMAKE_INSTALL_INCLUDEDIR.
+include(GNUInstallDirs)
 
 # =========================================================================
 #  Output directories — all artefacts go under build/<platform>/
@@ -80,7 +84,6 @@ option(BUILD_EXAMPLE_TCP "Build the TCP transport" OFF)
 option(BUILD_EXAMPLE_SERIAL "Build the generic serial transport" OFF)
 option(BUILD_EXAMPLE_PIPE "Build the pipe transport" OFF)
 option(BUILD_EXAMPLE_UNIX_SOCKET "Build the UNIX socket transport" OFF)
-option(BUILD_TESTING "Build the test suite" OFF)
 option(BUILD_ASAN "Build with AddressSanitizer" OFF)
 
 # =========================================================================
@@ -143,6 +146,8 @@ if(BUILD_LIB_STATIC)
     else()
         set_target_properties(cli_static PROPERTIES OUTPUT_NAME OpenLibCLI)
     endif()
+    # Installed as OpenLibCLI::OpenLibCLI_static
+    set_target_properties(cli_static PROPERTIES EXPORT_NAME OpenLibCLI_static)
     if(TARGET gen_version)
         add_dependencies(cli_static gen_version)
     endif()
@@ -158,7 +163,8 @@ target_include_directories(cli_shared PUBLIC
 )
 target_link_libraries(cli_shared PUBLIC ${PLATFORM_LIBS})
 target_compile_definitions(cli_shared PRIVATE CLI_SHARED BUILD_LIB_SHARED PUBLIC CLI_SHARED)
-set_target_properties(cli_shared PROPERTIES OUTPUT_NAME OpenLibCLI)
+# Installed as OpenLibCLI::OpenLibCLI
+set_target_properties(cli_shared PROPERTIES OUTPUT_NAME OpenLibCLI EXPORT_NAME OpenLibCLI)
 if(TARGET gen_version)
     add_dependencies(cli_shared gen_version)
 endif()
@@ -277,7 +283,6 @@ endif()
 #  Install rules + CMake package support (find_package)
 # =========================================================================
 include(CMakePackageConfigHelpers)
-include(GNUInstallDirs)
 
 # Read the version from the plain-text 'version' file
 file(READ "${CMAKE_SOURCE_DIR}/version" _RAW_VERSION)

@@ -91,6 +91,9 @@ static const char *s_cur_test = NULL;
 
 #define TEST_POOL_SIZE 48
 
+/* Checks of optional features are compiled only when the feature is (CLI_ENABLE_*): the
+ * suite runs in the default build and with any feature compiled out. */
+
 static char s_in[8192];
 static size_t s_in_len;
 static size_t s_in_pos;
@@ -316,9 +319,13 @@ static void register_test_commands(void) {
   (void)cli_add_command(&s_cli, h, "add", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "Add");
 
   h = cli_add_command(&s_cli, CLI_CMD_ROOT, "alpha", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "A");
+#if CLI_ENABLE_ALIASES
   (void)cli_cmd_add_alias(&s_cli, h, "zeta1");
+#endif
   h = cli_add_command(&s_cli, CLI_CMD_ROOT, "alpine", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "B");
+#if CLI_ENABLE_ALIASES
   (void)cli_cmd_add_alias(&s_cli, h, "zeta2");
+#endif
 
   (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "nest", cmd_nest, CLI_PRIV_USER, CLI_MODE_ANY, "");
   (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "loop", cmd_loop, CLI_PRIV_USER, CLI_MODE_ANY, "");
@@ -373,9 +380,14 @@ static void test_help_shows_text(void) {
   session_start();
 
   type("help\r");
+#if CLI_ENABLE_COMMAND_HELP
   ASSERT_OUT("  exit                Exit session");
   ASSERT_OUT("Show commands");
   ASSERT_NOT_OUT("secret"); /* hidden */
+#else
+  ASSERT_OUT("  exit\r\n");
+  ASSERT_NOT_OUT("secret"); /* hidden */
+#endif
   TEST_END();
 }
 
@@ -429,10 +441,12 @@ static void test_print_partial_line(void) {
   type("ask\r");
   ASSERT_OUT("Are you sure? ");
 
+#if CLI_ENABLE_PIPE_FILTER
   /* Also with a per-line consumer installed (line-buffered path). */
   out_clear();
   type("ask | include sure\r");
   ASSERT_OUT("Are you sure?");
+#endif
   TEST_END();
 }
 
@@ -525,6 +539,7 @@ static void test_navigation_depth_limit(void) {
   TEST_END();
 }
 
+#if CLI_ENABLE_MODE_NAMES
 static void test_mode_name_for_user_mode(void) {
   TEST_START("mode_name_for_user_mode");
   session_new();
@@ -540,6 +555,7 @@ static void test_mode_name_for_user_mode(void) {
   ASSERT_OUT("rtr> ");
   TEST_END();
 }
+#endif
 
 static void test_ctrl_d_follows_quit_policy(void) {
   TEST_START("ctrl_d_follows_quit_policy");
@@ -570,8 +586,10 @@ static void test_negative_handles_rejected(void) {
   ASSERT_EQ(cli_remove_command(&s_cli, -7), CLI_ERR);
   cli_hide_command(&s_cli, CLI_CMD_ROOT);
   cli_hide_command(&s_cli, TEST_POOL_SIZE + 3);
+#if CLI_ENABLE_ALIASES
   ASSERT_EQ(cli_cmd_add_alias(&s_cli, CLI_CMD_ROOT, "x"), CLI_ERR);
   ASSERT_EQ(cli_add_command_duplicate(&s_cli, CLI_CMD_ROOT, "x"), CLI_CMD_INVALID);
+#endif
   ASSERT_EQ(s_cli.cmd_pool_count, count);
   TEST_END();
 }
@@ -595,7 +613,9 @@ static void test_add_command_validation(void) {
             CLI_CMD_INVALID);
   ASSERT_EQ(cli_add_command(&s_cli, TEST_POOL_SIZE - 1, "orphan", cmd_name, 0, 0, "x"),
             CLI_CMD_INVALID);
+#if CLI_ENABLE_ALIASES
   ASSERT_EQ(cli_cmd_add_alias(&s_cli, s_h_show, "bad alias"), CLI_ERR);
+#endif
   ASSERT_EQ(s_cli.cmd_pool_count, count);
   TEST_END();
 }
@@ -609,7 +629,7 @@ static void test_reinit_clears_pool(void) {
   ASSERT_EQ(s_cli.cmd_pool_count, count);
   session_start();
   type("help\r");
-  ASSERT_EQ(out_count("Exit session"), 1);
+  ASSERT_EQ(out_count("  exit"), 1);
   TEST_END();
 }
 
@@ -653,17 +673,18 @@ static void test_csi_with_parameters(void) {
 
   /* Ctrl+Right (ESC[1;5C) and a private-mode sequence must not insert text. */
   type("hel\x1b[1;5Cp\x1b[?25h\r");
-  ASSERT_OUT("Exit session");
+  ASSERT_OUT("  exit");
   ASSERT_NOT_OUT("5C");
   ASSERT_NOT_OUT("25h");
 
   /* Ctrl+Left moves the cursor like Left. */
   out_clear();
   type("hep\x1b[1;5Dl\r");
-  ASSERT_OUT("Exit session");
+  ASSERT_OUT("  exit");
   TEST_END();
 }
 
+#if CLI_ENABLE_TAB_COMPLETION
 static void test_tab_completes_at_cursor(void) {
   TEST_START("tab_completes_at_cursor");
   session_new();
@@ -678,7 +699,9 @@ static void test_tab_completes_at_cursor(void) {
   ASSERT_OUT("RAN:version");
   TEST_END();
 }
+#endif
 
+#if CLI_ENABLE_TAB_COMPLETION && CLI_ENABLE_ALIASES
 static void test_tab_common_prefix_of_aliases(void) {
   TEST_START("tab_common_prefix_of_aliases");
   session_new();
@@ -690,6 +713,7 @@ static void test_tab_common_prefix_of_aliases(void) {
   ASSERT_STR_EQ(s_cli.input, "zeta1 ");
   TEST_END();
 }
+#endif
 
 static void test_question_mark(void) {
   TEST_START("question_mark");
@@ -754,6 +778,7 @@ static void test_exec_api(void) {
   TEST_END();
 }
 
+#if CLI_ENABLE_PRINT_TRANSPORT_CB
 static int s_transport_lines;
 static int s_transport_chars;
 static char s_last_line[128];
@@ -764,7 +789,9 @@ static void capture_line(cli_struct_t *cli, const char *line) {
   s_transport_chars += (int)strlen(line);
   snprintf(s_last_line, sizeof(s_last_line), "%s", line);
 }
+#endif
 
+#if CLI_ENABLE_PIPE_FILTER && CLI_ENABLE_COMMAND_HELP
 static void test_pipe_filters(void) {
   TEST_START("pipe_filters");
   session_new();
@@ -797,14 +824,17 @@ static void test_pipe_filters(void) {
   type("echo \"a|b\"\r");
   ASSERT_OUT("ARGS [a|b]");
 
+#if CLI_ENABLE_PRINT_TRANSPORT_CB
   /* The count total reaches a per-line consumer too. */
   s_transport_lines = 0;
   cli_set_print_transport_cb(&s_cli, capture_line);
   type("usage keys | count\r");
   ASSERT_STR_EQ(s_last_line, "Count: 8");
   cli_set_print_transport_cb(&s_cli, NULL);
+#endif
   TEST_END();
 }
+#endif
 
 static int s_v_kind;
 
@@ -834,6 +864,7 @@ static void test_print_cb_v_kind(void) {
  * History
  *=======================================================================================*/
 
+#if CLI_ENABLE_HISTORY
 static void test_history_ring_evicts_oldest(void) {
   TEST_START("history_ring_evicts_oldest");
   session_new();
@@ -862,7 +893,9 @@ static void test_history_ring_evicts_oldest(void) {
   ASSERT_OUT("history");
   TEST_END();
 }
+#endif
 
+#if CLI_ENABLE_HISTORY
 static void test_history_cleared_on_restart(void) {
   TEST_START("history_cleared_on_restart");
   session_new();
@@ -877,11 +910,13 @@ static void test_history_cleared_on_restart(void) {
   ASSERT_EQ(s_cli.history_count, 0);
   TEST_END();
 }
+#endif
 
 /*=======================================================================================
  * Authentication
  *=======================================================================================*/
 
+#if CLI_ENABLE_AUTH
 static void test_enable_prompt_waits_for_password(void) {
   TEST_START("enable_prompt_waits_for_password");
   session_new();
@@ -899,7 +934,9 @@ static void test_enable_prompt_waits_for_password(void) {
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
   TEST_END();
 }
+#endif
 
+#if CLI_ENABLE_AUTH
 static void test_password_keys_not_echoed(void) {
   TEST_START("password_keys_not_echoed");
   session_new();
@@ -915,7 +952,9 @@ static void test_password_keys_not_echoed(void) {
   ASSERT_STR_EQ(s_cli.input, "hunter");
   TEST_END();
 }
+#endif
 
+#if CLI_ENABLE_AUTH
 static void test_login_prompt_hides_history(void) {
   TEST_START("login_prompt_hides_history");
   session_new();
@@ -932,7 +971,9 @@ static void test_login_prompt_hides_history(void) {
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
   TEST_END();
 }
+#endif
 
+#if CLI_ENABLE_AUTH
 static void test_enable_attempt_limit(void) {
   TEST_START("enable_attempt_limit");
   session_new();
@@ -944,6 +985,7 @@ static void test_enable_attempt_limit(void) {
   ASSERT_EQ(type("enable\rx\r"), CLI_ERR_AUTH);
   ASSERT_OUT("Closing Session");
 
+#if CLI_ENABLE_TIME_SOURCE
   /* Lockout: input during the lockout is discarded, the shell returns afterwards. */
   session_new();
   cli_set_enable_secret(&s_cli, "s3cret");
@@ -963,6 +1005,7 @@ static void test_enable_attempt_limit(void) {
   ASSERT_NOT_OUT("RAN:version");
   type("show version\r");
   ASSERT_OUT("RAN:version");
+#endif
 
   /* Lockout requested but no clock: the session is closed instead. */
   session_new();
@@ -974,7 +1017,9 @@ static void test_enable_attempt_limit(void) {
   ASSERT_EQ(type("enable\rx\r"), CLI_ERR_AUTH);
   TEST_END();
 }
+#endif
 
+#if CLI_ENABLE_AUTH
 static cli_struct_t *s_cb_cli;
 
 static int8_t auth_cb(cli_struct_t *cli, const char *user, const char *pass) {
@@ -990,7 +1035,9 @@ static int8_t auth_cb(cli_struct_t *cli, const char *user, const char *pass) {
   }
   return rc;
 }
+#endif
 
+#if CLI_ENABLE_AUTH
 static void test_auth_callback_sets_privilege(void) {
   TEST_START("auth_callback_sets_privilege");
   session_new();
@@ -1015,11 +1062,13 @@ static void test_auth_callback_sets_privilege(void) {
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
   TEST_END();
 }
+#endif
 
 /*=======================================================================================
  * Idle Timeout
  *=======================================================================================*/
 
+#if CLI_ENABLE_IDLE_TIMEOUT
 static int s_idle_calls;
 
 static int8_t idle_cb(cli_struct_t *cli) {
@@ -1027,7 +1076,9 @@ static int8_t idle_cb(cli_struct_t *cli) {
   s_idle_calls++;
   return CLI_OK;
 }
+#endif
 
+#if CLI_ENABLE_IDLE_TIMEOUT
 static void test_idle_callback_always_fires(void) {
   TEST_START("idle_callback_always_fires");
   session_new();
@@ -1046,7 +1097,9 @@ static void test_idle_callback_always_fires(void) {
   ASSERT_EQ(s_idle_calls, 2);
   TEST_END();
 }
+#endif
 
+#if CLI_ENABLE_IDLE_TIMEOUT
 static void test_idle_reset_fires_once(void) {
   TEST_START("idle_reset_fires_once");
   session_new();
@@ -1068,6 +1121,7 @@ static void test_idle_reset_fires_once(void) {
   ASSERT_EQ(out_count("Idle timeout"), 2);
   TEST_END();
 }
+#endif
 
 /*=======================================================================================
  * NULL Safety
@@ -1087,6 +1141,7 @@ static void test_nested_exec(void) {
   ASSERT_OUT("ARGS [inner]");
   ASSERT_OUT("OUTER:outerarg rc=0");
 
+#if CLI_ENABLE_PIPE_FILTER
   /* The outer pipe filter applies to nested output. */
   out_clear();
   type("nest outerarg | include OUTER\r");
@@ -1097,6 +1152,7 @@ static void test_nested_exec(void) {
   out_clear();
   type("nestpipe\r");
   ASSERT_OUT("% Pipe filters cannot be used in a nested command.");
+#endif
 
   /* Self-recursion is stopped by the nesting limit instead of overflowing the stack. */
   out_clear();
@@ -1109,8 +1165,12 @@ static void test_nested_exec(void) {
 static void test_exec_preserves_editor(void) {
   TEST_START("exec_preserves_editor");
   session_new();
+#if CLI_ENABLE_AUTH
   cli_set_enable_secret(&s_cli, "hunter");
   session_start();
+#else
+  session_start();
+#endif
 
   /* A line being typed survives a programmatic command. */
   type("show ve");
@@ -1119,6 +1179,7 @@ static void test_exec_preserves_editor(void) {
   ASSERT_STR_EQ(s_cli.input, "show ve");
   type("\x15"); /* Ctrl+U */
 
+#if CLI_ENABLE_AUTH && CLI_ENABLE_HISTORY
   /* So does a half-typed password. */
   type("enable\r");
   type("hun");
@@ -1128,6 +1189,7 @@ static void test_exec_preserves_editor(void) {
 
   /* Programmatic commands are not added to the user's history. */
   ASSERT_EQ(s_cli.history_count, 1); /* only the typed "enable" */
+#endif
   TEST_END();
 }
 
@@ -1159,6 +1221,7 @@ static void test_output_line_handling(void) {
   type("warn\r");
   ASSERT_OUT("partial\r\n% bad thing\r\n");
 
+#if CLI_ENABLE_PRINT_TRANSPORT_CB
   /* Lines longer than the output buffer are delivered in pieces, nothing is lost. */
   s_transport_lines = 0;
   s_transport_chars = 0;
@@ -1167,6 +1230,7 @@ static void test_output_line_handling(void) {
   cli_set_print_transport_cb(&s_cli, NULL);
   ASSERT_EQ(s_transport_chars, 1500);
   ASSERT_EQ(s_transport_lines, 2);
+#endif
   TEST_END();
 }
 
@@ -1177,8 +1241,13 @@ static void test_short_writes(void) {
 
   s_write_chunk = 3;
   type("help\r");
+#if CLI_ENABLE_COMMAND_HELP
   ASSERT_OUT("  exit                Exit session");
   ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_RUN);
+#else
+  ASSERT_OUT("  exit\r\n");
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_RUN);
+#endif
   TEST_END();
 }
 
@@ -1193,10 +1262,13 @@ static void test_registration_rules(void) {
   ASSERT_TRUE(cli_add_command(&s_cli, CLI_CMD_ROOT, "cfg", cmd_name, 0, CLI_MODE_EXEC, "") >= 0);
   ASSERT_EQ(cli_add_command(&s_cli, CLI_CMD_ROOT, "cfg", cmd_name, 0, CLI_MODE_ANY, ""),
             CLI_CMD_INVALID);
+#if CLI_ENABLE_ALIASES
   /* An alias may not shadow a sibling name either. */
   ASSERT_EQ(cli_cmd_add_alias(&s_cli, s_h_show, "showall"), CLI_ERR);
   ASSERT_EQ(cli_cmd_add_alias(&s_cli, s_h_show, "SHOW"), CLI_ERR);
+#endif
 
+#if CLI_ENABLE_AUTH
   /* Over-long enable secrets are refused instead of being silently shortened. */
   char long_secret[CLI_MAX_ENABLE_SECRET_LEN + 4];
   memset(long_secret, 's', sizeof(long_secret) - 1U);
@@ -1204,6 +1276,7 @@ static void test_registration_rules(void) {
   ASSERT_EQ(cli_set_enable_secret(&s_cli, "ok"), CLI_OK);
   ASSERT_EQ(cli_set_enable_secret(&s_cli, long_secret), CLI_ERR);
   ASSERT_STR_EQ(s_cli.enable_privilege_secret, "ok");
+#endif
   TEST_END();
 }
 
@@ -1214,20 +1287,31 @@ static void test_help_and_completion_ui(void) {
 
   /* "word?" lists matching commands at this level, not the children of one of them. */
   type("sh?");
+#if CLI_ENABLE_COMMAND_HELP
   ASSERT_OUT("show ");
   ASSERT_OUT("showall");
+#else
+  ASSERT_OUT("  show\r\n");
+  ASSERT_OUT("showall");
+#endif
   ASSERT_NOT_OUT("version");
   type("\x15");
 
+#if CLI_ENABLE_TAB_COMPLETION
   /* Completion rewrites a plainly typed word in the keyword's case. */
   type("SH\t");
   ASSERT_STR_EQ(s_cli.input, "show");
   type("\x15");
+#endif
 
   /* Usage text only mentions what exists. */
   out_clear();
   type("usage commands\r");
+#if CLI_ENABLE_ALIASES
   ASSERT_OUT("clear / cls");
+#else
+  ASSERT_OUT("  clear  ");
+#endif
   ASSERT_NOT_OUT("help show");
 
   /* Ctrl+L on a dumb terminal does not emit ANSI codes. */
@@ -1304,11 +1388,13 @@ static void test_help_after_arguments(void) {
   ASSERT_EQ(type("echo 1 ?"), CLI_OK);
   ASSERT_OUT("<cr>");
   ASSERT_NOT_OUT("Unknown");
+#if CLI_ENABLE_TAB_COMPLETION
   out_clear();
   ASSERT_EQ(type("\x15"
                  "echo 1 x\t"),
             CLI_OK);
   ASSERT_OUT("\a");
+#endif
   TEST_END();
 }
 
@@ -1321,10 +1407,12 @@ static void test_submenu_offers_root_commands(void) {
   ASSERT_TRUE(s_cli.context == s_h_calc);
   out_clear();
 
+#if CLI_ENABLE_TAB_COMPLETION
   /* 'ec' matches nothing in the submenu; execution would run the root 'echo'. */
   ASSERT_EQ(type("ec\t"), CLI_OK);
   ASSERT_OUT("echo ");
   out_clear();
+#endif
   ASSERT_EQ(type("\x15?"), CLI_OK);
   ASSERT_OUT("arith");
   ASSERT_OUT("echo");
@@ -1351,8 +1439,12 @@ static void test_start_begins_fresh_session(void) {
   cli_start(&s_cli);
   ASSERT_EQ(run(), CLI_OK);
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+#if CLI_ENABLE_HISTORY
   ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_EXEC);
   ASSERT_EQ(s_cli.history_count, 0);
+#else
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_EXEC);
+#endif
 
   /* A write failure of the previous peer does not end the next session. */
   s_write_fails = true;
@@ -1408,6 +1500,7 @@ static void test_no_commands_after_write_error(void) {
   TEST_END();
 }
 
+#if CLI_ENABLE_AUTH
 static void test_auth_prompt_keeps_running_args(void) {
   TEST_START("auth_prompt_keeps_running_args");
   session_new();
@@ -1429,7 +1522,9 @@ static void test_auth_prompt_keeps_running_args(void) {
   ASSERT_EQ(s_cli.input[0], '\0');
   TEST_END();
 }
+#endif
 
+#if CLI_ENABLE_IDLE_TIMEOUT && CLI_ENABLE_AUTH
 static void test_idle_untouched_session_not_reset(void) {
   TEST_START("idle_untouched_session_not_reset");
 
@@ -1469,9 +1564,11 @@ static void test_idle_untouched_session_not_reset(void) {
   ASSERT_OUT("Idle timeout.");
   TEST_END();
 }
+#endif
 
 /* Round 4 regressions ------------------------------------------------------------------*/
 
+#if CLI_ENABLE_AUTH
 static void test_overlong_credentials_rejected(void) {
   char user[CLI_MAX_USERNAME_LEN];
   char pass[CLI_MAX_PASSWORD_LEN];
@@ -1511,7 +1608,9 @@ static void test_overlong_credentials_rejected(void) {
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
   TEST_END();
 }
+#endif
 
+#if CLI_ENABLE_AUTH && CLI_ENABLE_IDLE_TIMEOUT
 static void test_lockout_survives_idle_timeout(void) {
   TEST_START("lockout_survives_idle_timeout");
   session_new();
@@ -1538,6 +1637,7 @@ static void test_lockout_survives_idle_timeout(void) {
   ASSERT_EQ(s_cli.auth_state, CLI_AUTH_AUTHENTICATED);
   TEST_END();
 }
+#endif
 
 static void test_empty_word_is_no_command(void) {
   TEST_START("empty_word_is_no_command");
@@ -1554,6 +1654,7 @@ static void test_empty_word_is_no_command(void) {
   TEST_END();
 }
 
+#if CLI_ENABLE_AUTH && CLI_ENABLE_HISTORY
 static void test_relogin_not_in_new_history(void) {
   TEST_START("relogin_not_in_new_history");
   session_new();
@@ -1570,17 +1671,21 @@ static void test_relogin_not_in_new_history(void) {
   ASSERT_EQ(s_cli.history_count, 0);
   TEST_END();
 }
+#endif
 
 /* Round 5 regressions ------------------------------------------------------------------*/
 
+#if CLI_ENABLE_PERIODIC_CALLBACK
 static int8_t periodic_restart_cb(cli_struct_t *cli) {
   cli_restart_session(cli);
   return CLI_OK;
 }
+#endif
 
 static void test_restart_holds_pending_input(void) {
   TEST_START("restart_holds_pending_input");
 
+#if CLI_ENABLE_AUTH && CLI_ENABLE_IDLE_TIMEOUT
   /* Idle reset in the tick that also brings a keystroke: it waits for the login prompt
    * instead of reaching the command editor (no command list before login). */
   session_new();
@@ -1596,7 +1701,9 @@ static void test_restart_holds_pending_input(void) {
   ASSERT_NOT_OUT("Show commands");
   ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
   ASSERT_STR_EQ(s_cli.input, "?");
+#endif
 
+#if CLI_ENABLE_IDLE_TIMEOUT
   /* Without login: the whole line appears after the new prompt and runs as shown. */
   session_new();
   cli_set_idle_timeout(&s_cli, 5U);
@@ -1607,7 +1714,9 @@ static void test_restart_holds_pending_input(void) {
   type("echo abc\r"); /* the restart dropped the typed "x" */
   ASSERT_OUT("rtr> echo abc");
   ASSERT_OUT("ARGS [abc]");
+#endif
 
+#if CLI_ENABLE_PERIODIC_CALLBACK
   /* Same for a periodic callback that restarts the session. */
   session_new();
   cli_set_periodic_cb(&s_cli, periodic_restart_cb);
@@ -1618,9 +1727,11 @@ static void test_restart_holds_pending_input(void) {
   type("echo abc\r");
   ASSERT_OUT("rtr> echo abc");
   ASSERT_OUT("ARGS [abc]");
+#endif
   TEST_END();
 }
 
+#if CLI_ENABLE_AUTH
 static int8_t cmd_enable_twice(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
                                const char *argv[]) {
   (void)cmd;
@@ -1630,6 +1741,7 @@ static int8_t cmd_enable_twice(cli_struct_t *cli, const char *cmd, cli_argc_t ar
   return cli_exec(cli, "enable"); /* a password prompt is already pending: refused */
 }
 
+#if CLI_ENABLE_TIME_SOURCE
 static char s_enable_user[CLI_MAX_USERNAME_LEN + 1];
 
 static int8_t enable_user_cb(cli_struct_t *cli, const char *user, const char *pass) {
@@ -1637,7 +1749,10 @@ static int8_t enable_user_cb(cli_struct_t *cli, const char *user, const char *pa
   (void)snprintf(s_enable_user, sizeof(s_enable_user), "%s", user);
   return (strcmp(pass, "s3") == 0) ? CLI_OK : CLI_ERR_AUTH;
 }
+#endif
+#endif
 
+#if CLI_ENABLE_AUTH
 static void test_enable_state_handling(void) {
   TEST_START("enable_state_handling");
 
@@ -1657,6 +1772,7 @@ static void test_enable_state_handling(void) {
   type("echo x\r");
   ASSERT_OUT("ARGS [x]");
 
+#if CLI_ENABLE_TIME_SOURCE
   /* The end of an enable lockout keeps the logged-in user's name. */
   session_new();
   (void)cli_add_user(&s_cli, "alice", "pw", CLI_PRIV_USER);
@@ -1674,9 +1790,12 @@ static void test_enable_state_handling(void) {
   type("enable\rs3\r");
   ASSERT_STR_EQ(s_enable_user, "alice");
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+#endif
   TEST_END();
 }
+#endif
 
+#if CLI_ENABLE_HISTORY
 static void test_history_browse_ends_on_submit(void) {
   TEST_START("history_browse_ends_on_submit");
   session_new();
@@ -1694,6 +1813,7 @@ static void test_history_browse_ends_on_submit(void) {
   ASSERT_STR_EQ(s_cli.input, "echo bb");
   TEST_END();
 }
+#endif
 
 static int8_t quit_hook_partial(cli_struct_t *cli) {
   cli_print(cli, "Really quit?");
@@ -1747,11 +1867,13 @@ static void test_registration_reports_failures(void) {
   TEST_START("registration_reports_failures");
   session_new();
 
+#if CLI_ENABLE_MODE_NAMES
   /* A mode name that does not fit is refused; the old one stays. */
   ASSERT_EQ(cli_set_mode_name(&s_cli, CLI_MODE_USER_BASE, "lab"), CLI_OK);
   ASSERT_EQ(cli_set_mode_name(&s_cli, CLI_MODE_USER_BASE,
                               "a-mode-name-that-is-much-longer-than-the-buffer"),
             CLI_ERR);
+#endif
 
   /* Built-ins that do not fit the pool are reported. */
   memset(&tp, 0, sizeof(tp));
@@ -1764,6 +1886,172 @@ static void test_registration_reports_failures(void) {
   ASSERT_EQ(s_cli.cmd_pool_count > 0, true);
   TEST_END();
 }
+
+/* Round 6 regressions ------------------------------------------------------------------*/
+
+#if CLI_ENABLE_AUTH && CLI_ENABLE_IDLE_TIMEOUT
+static int8_t idle_relogin_cb(cli_struct_t *cli) {
+  cli_restart_session(cli);
+  cli_request_auth(cli); /* during the restart: must not be lost */
+  return CLI_OK;
+}
+#endif
+
+#if CLI_ENABLE_AUTH && CLI_ENABLE_IDLE_TIMEOUT
+static void test_relogin_requested_during_restart(void) {
+  TEST_START("relogin_requested_during_restart");
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_set_idle_timeout_cb(&s_cli, 5U, idle_relogin_cb);
+  session_start();
+
+  type("x");
+  s_now += 10U;
+  out_clear();
+  (void)run();
+  ASSERT_OUT("Username: ");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  out_clear();
+  type("echo hi\r"); /* a username, not a command */
+  ASSERT_NOT_OUT("ARGS [hi]");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_PASSWORD);
+
+  /* A new connection (cli_start) forgets a request made for the previous one. */
+  session_new();
+  cli_set_idle_timeout_cb(&s_cli, 5U, idle_relogin_cb);
+  session_start();
+  type("x");
+  s_now += 10U;
+  (void)run();
+  cli_start(&s_cli);
+  (void)run();
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_NONE);
+  TEST_END();
+}
+#endif
+
+static void test_unreachable_children_ignored(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("unreachable_children_ignored");
+  session_new();
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "info", cmd_echo, CLI_PRIV_USER, CLI_MODE_ANY,
+                      "Info");
+  (void)cli_add_command(&s_cli, h, "secret", cmd_name, CLI_PRIV_PRIVILEGED, CLI_MODE_ANY, "");
+  session_start();
+
+  /* For a user the privileged child does not exist: 'info' takes arguments, is no submenu. */
+  type("info abc\r");
+  ASSERT_OUT("ARGS [abc]");
+  type("info\r");
+  ASSERT_EQ(s_cli.context, CLI_CMD_ROOT);
+  out_clear();
+  type("info ?");
+  ASSERT_NOT_OUT("secret");
+  TEST_END();
+}
+
+static int8_t cmd_quit_inside(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                              const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  (void)cli_exec(cli, "quit");
+  return CLI_OK; /* the session is stopped all the same */
+}
+
+static void test_engine_reports_stop_at_once(void) {
+  const char *line = "qi\r";
+
+  TEST_START("engine_reports_stop_at_once");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "qi", cmd_quit_inside, CLI_PRIV_USER, CLI_MODE_ANY,
+                        "");
+  session_start();
+
+  memcpy(&s_in[s_in_len], line, strlen(line));
+  s_in_len += strlen(line);
+  int8_t rc = cli_session_engine(&s_cli); /* one tick: ASSERT_EQ evaluates twice */
+  ASSERT_EQ(rc, CLI_ERR_QUIT);
+  TEST_END();
+}
+
+#if CLI_ENABLE_AUTH
+static int8_t cmd_lock(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  cli_request_auth(cli);
+  cli_println(cli, "Session locked.");
+  return CLI_OK;
+}
+#endif
+
+#if CLI_ENABLE_AUTH
+static void test_credential_prompt_placement(void) {
+  TEST_START("credential_prompt_placement");
+
+  /* From a command: the prompt follows the command's output. */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "lock", cmd_lock, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  session_start();
+  type("lock\r");
+  ASSERT_OUT("Session locked.\r\nUsername: ");
+
+  /* From outside any command while the user types: on a fresh line. */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  session_start();
+  type("ech");
+  out_clear();
+  cli_request_auth(&s_cli);
+  ASSERT_TRUE(strncmp(s_out, "\r\nUsername: ", 12U) == 0);
+
+  /* cli_exec() of such a command at the login prompt: the prompt is shown once. */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "lock", cmd_lock, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  cli_require_authorization(&s_cli, true);
+  session_start();
+  out_clear();
+  (void)cli_exec(&s_cli, "lock");
+  ASSERT_EQ(out_count("Username: "), 1);
+
+  /* The enable password prompt follows the command's output too. */
+  session_new();
+  ASSERT_EQ(cli_set_enable_secret(&s_cli, "s3"), CLI_OK);
+  session_start();
+  out_clear();
+  type("enable\r");
+  ASSERT_OUT("enable\r\nPassword: ");
+  ASSERT_EQ(out_count("Password: "), 1);
+  TEST_END();
+}
+#endif
+
+#if CLI_ENABLE_AUTH
+static void test_partial_secret_erased(void) {
+  TEST_START("partial_secret_erased");
+
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  session_start();
+  type("admin\rhunter");
+  ASSERT_EQ(s_cli.input_len, 6);
+  cli_restart_session(&s_cli);
+  ASSERT_TRUE(s_cli.input[0] == '\0' && s_cli.input[1] == '\0' && s_cli.input[5] == '\0');
+
+  session_new();
+  ASSERT_EQ(cli_set_enable_secret(&s_cli, "s3cret"), CLI_OK);
+  session_start();
+  type("enable\rs3cr");
+  cli_start(&s_cli);
+  ASSERT_TRUE(s_cli.input[0] == '\0' && s_cli.input[1] == '\0' && s_cli.input[3] == '\0');
+  TEST_END();
+}
+#endif
 
 static void test_null_safety(void) {
   TEST_START("null_safety");
@@ -1801,7 +2089,9 @@ int main(void) {
   RUN_SUITE(test_end_and_disable);
   RUN_SUITE(test_user_mode_submenus);
   RUN_SUITE(test_navigation_depth_limit);
+#if CLI_ENABLE_MODE_NAMES
   RUN_SUITE(test_mode_name_for_user_mode);
+#endif
   RUN_SUITE(test_ctrl_d_follows_quit_policy);
 
   printf("\n--- command pool ---\n");
@@ -1812,30 +2102,54 @@ int main(void) {
 
   printf("\n--- line editor ---\n");
   RUN_SUITE(test_csi_with_parameters);
+#if CLI_ENABLE_TAB_COMPLETION
   RUN_SUITE(test_tab_completes_at_cursor);
+#endif
+#if CLI_ENABLE_TAB_COMPLETION && CLI_ENABLE_ALIASES
   RUN_SUITE(test_tab_common_prefix_of_aliases);
+#endif
   RUN_SUITE(test_question_mark);
 
   printf("\n--- tokenizer / exec / filters ---\n");
   RUN_SUITE(test_quoted_arguments);
   RUN_SUITE(test_exec_api);
+#if CLI_ENABLE_PIPE_FILTER && CLI_ENABLE_COMMAND_HELP
   RUN_SUITE(test_pipe_filters);
+#endif
   RUN_SUITE(test_print_cb_v_kind);
 
   printf("\n--- history ---\n");
+#if CLI_ENABLE_HISTORY
   RUN_SUITE(test_history_ring_evicts_oldest);
+#endif
+#if CLI_ENABLE_HISTORY
   RUN_SUITE(test_history_cleared_on_restart);
+#endif
 
   printf("\n--- authentication ---\n");
+#if CLI_ENABLE_AUTH
   RUN_SUITE(test_enable_prompt_waits_for_password);
+#endif
+#if CLI_ENABLE_AUTH
   RUN_SUITE(test_password_keys_not_echoed);
+#endif
+#if CLI_ENABLE_AUTH
   RUN_SUITE(test_login_prompt_hides_history);
+#endif
+#if CLI_ENABLE_AUTH
   RUN_SUITE(test_enable_attempt_limit);
+#endif
+#if CLI_ENABLE_AUTH
   RUN_SUITE(test_auth_callback_sets_privilege);
+#endif
 
   printf("\n--- idle timeout ---\n");
+#if CLI_ENABLE_IDLE_TIMEOUT
   RUN_SUITE(test_idle_callback_always_fires);
+#endif
+#if CLI_ENABLE_IDLE_TIMEOUT
   RUN_SUITE(test_idle_reset_fires_once);
+#endif
 
   printf("\n--- round 2 ---\n");
   RUN_SUITE(test_nested_exec);
@@ -1856,19 +2170,44 @@ int main(void) {
   RUN_SUITE(test_set_mode_restores_privilege);
   RUN_SUITE(test_rx_budget_per_tick);
   RUN_SUITE(test_no_commands_after_write_error);
+#if CLI_ENABLE_AUTH
   RUN_SUITE(test_auth_prompt_keeps_running_args);
+#endif
+#if CLI_ENABLE_IDLE_TIMEOUT && CLI_ENABLE_AUTH
   RUN_SUITE(test_idle_untouched_session_not_reset);
+#endif
+#if CLI_ENABLE_AUTH
   RUN_SUITE(test_overlong_credentials_rejected);
+#endif
+#if CLI_ENABLE_AUTH && CLI_ENABLE_IDLE_TIMEOUT
   RUN_SUITE(test_lockout_survives_idle_timeout);
+#endif
   RUN_SUITE(test_empty_word_is_no_command);
+#if CLI_ENABLE_AUTH && CLI_ENABLE_HISTORY
   RUN_SUITE(test_relogin_not_in_new_history);
+#endif
   RUN_SUITE(test_restart_holds_pending_input);
+#if CLI_ENABLE_AUTH
   RUN_SUITE(test_enable_state_handling);
+#endif
+#if CLI_ENABLE_HISTORY
   RUN_SUITE(test_history_browse_ends_on_submit);
+#endif
   RUN_SUITE(test_ctrl_d_output_like_quit);
   RUN_SUITE(test_exec_from_outside_redraws);
   RUN_SUITE(test_escape_parameter_saturates);
   RUN_SUITE(test_registration_reports_failures);
+#if CLI_ENABLE_AUTH && CLI_ENABLE_IDLE_TIMEOUT
+  RUN_SUITE(test_relogin_requested_during_restart);
+#endif
+  RUN_SUITE(test_unreachable_children_ignored);
+  RUN_SUITE(test_engine_reports_stop_at_once);
+#if CLI_ENABLE_AUTH
+  RUN_SUITE(test_credential_prompt_placement);
+#endif
+#if CLI_ENABLE_AUTH
+  RUN_SUITE(test_partial_secret_erased);
+#endif
 
   printf("\n--- robustness ---\n");
   RUN_SUITE(test_write_error_ends_session);

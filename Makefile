@@ -100,12 +100,10 @@ else
     EXE_EXT    :=
 endif
 
-# AddressSanitizer — separate output directory + sanitizer flags
+# AddressSanitizer — separate output directory (flags: see "Compiler flags")
 BUILD_ASAN ?= 0
 ifeq ($(BUILD_ASAN),1)
 BUILD_DIR := $(BUILD_DIR)-asan
-CFLAGS    += -fsanitize=address -fno-omit-frame-pointer -g
-LDFLAGS   += -fsanitize=address
 endif
 
 EMBED_DIR := $(BUILD_BASE)/embedded-baremetal
@@ -125,18 +123,27 @@ CFLAGS ?= -std=c99 -Wall -Wextra -Werror -Wpedantic -Wshadow \
             -O2 -g -ffunction-sections -fdata-sections
 CFLAGS += -I$(INC_DIR)
 
-# POSIX feature test macros for -std=c99: POSIX.1-2008 (nanosleep, clock_gettime, lstat,
-# mkfifo, poll, ...). A POSIX level hides the macOS extensions the examples use
-# (getpeereid, SO_NOSIGPIPE), so those are requested explicitly there.
-ifneq ($(PLATFORM),windows)
-CFLAGS += -D_POSIX_C_SOURCE=200809L
-endif
-ifeq ($(PLATFORM),macos)
-CFLAGS += -D_DARWIN_C_SOURCE
+# Feature-test macros: -std=c99 makes glibc / musl hide POSIX (nanosleep, clock_gettime,
+# lstat, mkfifo, ...) and the BSD extras the examples use (flock). _DEFAULT_SOURCE gives
+# the system's normal set back. macOS and the BSDs show everything without a macro; a
+# POSIX level there would hide getpeereid() and SO_NOSIGPIPE instead.
+ifeq ($(_UNAME),Linux)
+CFLAGS += -D_DEFAULT_SOURCE
 endif
 
-# Linker flags for host examples
+# Linker flags for host examples (Apple's linker spells them differently)
+ifeq ($(PLATFORM),macos)
+LDFLAGS      ?= -Wl,-dead_strip
+MAP_FLAG     := -Wl,-map,
+else
 LDFLAGS      ?= -Wl,--gc-sections
+MAP_FLAG     := -Wl,-Map,
+endif
+
+ifeq ($(BUILD_ASAN),1)
+CFLAGS    += -fsanitize=address -fno-omit-frame-pointer -g
+LDFLAGS   += -fsanitize=address
+endif
 
 ARFLAGS      := rcs
 
@@ -197,11 +204,22 @@ SHARED_LINK_FLAGS := -shared -Wl,--out-implib,$(SHARED_IMPLIB_OUT)
 else ifeq ($(PLATFORM),macos)
 SHARED_LIB_OUT := $(LIB_DIR)/libopenlibcli.dylib
 SHARED_IMPLIB_OUT :=
-SHARED_LINK_FLAGS := -dynamiclib
+SHARED_LINK_FLAGS := -dynamiclib -install_name @rpath/libopenlibcli.dylib
 else
 SHARED_LIB_OUT := $(LIB_DIR)/libopenlibcli.so
 SHARED_IMPLIB_OUT :=
-SHARED_LINK_FLAGS := -shared
+SHARED_LINK_FLAGS := -shared -Wl,-soname,libopenlibcli.so
+endif
+
+# How examples link the shared library. Windows: the DLL is copied next to them. Elsewhere
+# by name, with an rpath relative to the executable, so they run from any directory (not
+# only the repository root, as a path recorded at link time would require).
+ifeq ($(PLATFORM),windows)
+LIB_LINK := $(SHARED_LIB_OUT)
+else ifeq ($(PLATFORM),macos)
+LIB_LINK := -L$(LIB_DIR) -lopenlibcli -Wl,-rpath,@loader_path/../libs
+else
+LIB_LINK := -L$(LIB_DIR) -lopenlibcli -Wl,-rpath,'$$ORIGIN/../libs'
 endif
 LIB_OUT      := $(SHARED_LIB_OUT)
 TELNET_BIN   := $(BIN_DIR)/cli_server_telnet$(EXE_EXT)
@@ -362,7 +380,7 @@ ifeq ($(BUILD_EXAMPLE_TELNET),1)
 cli_server_telnet telnet: $(TELNET_BIN)
 
 $(TELNET_BIN): $(EXAMPLE_DIR)/win_linux/telnet/cli_server_telnet.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) | $(BIN_DIR)
-	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/telnet/cli_server_telnet.c $(EXAMPLE_DIR)/win_linux/telnet/cli_transport_telnet.c $(DEMO_SHARED_SRC) $(LIB_OUT) $(PLAT_LIBS) -Wl,-Map,$(BUILD_DIR)/cli_server_telnet.map -o $@
+	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/telnet/cli_server_telnet.c $(EXAMPLE_DIR)/win_linux/telnet/cli_transport_telnet.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_telnet.map -o $@
 else
 cli_server_telnet telnet:
 	@echo "cli_server_telnet requires BUILD_EXAMPLE_TELNET=1."
@@ -377,7 +395,7 @@ ifeq ($(BUILD_EXAMPLE_TCP),1)
 cli_server_tcp tcp: $(TCP_BIN)
 
 $(TCP_BIN): $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.c $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.h $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) | $(BIN_DIR)
-	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.c $(EXAMPLE_DIR)/win_linux/tcp/cli_transport_tcp.c $(DEMO_SHARED_SRC) $(LIB_OUT) $(PLAT_LIBS) -Wl,-Map,$(BUILD_DIR)/cli_server_tcp.map -o $@
+	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.c $(EXAMPLE_DIR)/win_linux/tcp/cli_transport_tcp.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_tcp.map -o $@
 else
 cli_server_tcp tcp:
 	@echo "cli_server_tcp requires BUILD_EXAMPLE_TCP=1."
@@ -392,7 +410,7 @@ ifeq ($(BUILD_EXAMPLE_SERIAL),1)
 cli_server_serial uart: $(SERIAL_BIN)
 
 $(SERIAL_BIN): $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.c $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.h $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) | $(BIN_DIR)
-	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.c $(EXAMPLE_DIR)/win_linux/serial/cli_transport_serial.c $(DEMO_SHARED_SRC) $(LIB_OUT) $(PLAT_LIBS) -Wl,-Map,$(BUILD_DIR)/cli_server_serial.map -o $@
+	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.c $(EXAMPLE_DIR)/win_linux/serial/cli_transport_serial.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_serial.map -o $@
 else
 cli_server_serial uart:
 	@echo "cli_server_serial requires BUILD_EXAMPLE_SERIAL=1."
@@ -413,8 +431,8 @@ PIPE_THREAD_LIBS := -lpthread
 endif
 
 $(PIPE_BIN): $(EXAMPLE_DIR)/win_linux/pipe/cli_server_pipe.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) | $(BIN_DIR)
-	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/pipe/cli_server_pipe.c $(EXAMPLE_DIR)/win_linux/pipe/cli_transport_pipe.c $(DEMO_SHARED_SRC) $(LIB_OUT) $(PLAT_LIBS) $(PIPE_THREAD_LIBS) \
-	    -Wl,-Map,$(BUILD_DIR)/cli_server_pipe.map -o $@
+	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/pipe/cli_server_pipe.c $(EXAMPLE_DIR)/win_linux/pipe/cli_transport_pipe.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(PIPE_THREAD_LIBS) \
+	    $(MAP_FLAG)$(BUILD_DIR)/cli_server_pipe.map -o $@
 else
 cli_server_pipe pipe:
 	@echo "cli_server_pipe requires BUILD_EXAMPLE_PIPE=1."
@@ -430,8 +448,8 @@ ifneq ($(PLATFORM),windows)
 cli_server_unix_socket unix-socket: $(UNIX_SOCK_BIN)
 
 $(UNIX_SOCK_BIN): $(EXAMPLE_DIR)/linux/unix_socket/cli_server_unix_socket.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) | $(BIN_DIR)
-	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/linux/unix_socket/cli_server_unix_socket.c $(EXAMPLE_DIR)/linux/unix_socket/cli_transport_unix_socket.c $(DEMO_SHARED_SRC) $(LIB_OUT) $(PLAT_LIBS) -lpthread \
-	    -Wl,-Map,$(BUILD_DIR)/cli_server_unix_socket.map -o $@
+	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/linux/unix_socket/cli_server_unix_socket.c $(EXAMPLE_DIR)/linux/unix_socket/cli_transport_unix_socket.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) -lpthread \
+	    $(MAP_FLAG)$(BUILD_DIR)/cli_server_unix_socket.map -o $@
 else
 .PHONY: cli_server_unix_socket unix-socket
 cli_server_unix_socket unix-socket:

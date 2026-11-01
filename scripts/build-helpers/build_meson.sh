@@ -114,7 +114,7 @@ fi
 for _var in BUILD_EXAMPLE_TELNET BUILD_EXAMPLE_TCP BUILD_EXAMPLE_SERIAL BUILD_EXAMPLE_PIPE BUILD_EXAMPLE_UNIX_SOCKET; do
     if [ -n "${!_var+x}" ]; then
         _already=0
-        for _opt in "${MESON_OPTS[@]}"; do
+        for _opt in ${MESON_OPTS[@]+"${MESON_OPTS[@]}"}; do
             if [[ "$_opt" == "-D$_var="* ]]; then _already=1; break; fi
         done
         if [ "$_already" -eq 0 ]; then
@@ -131,7 +131,7 @@ done
 #  Configure
 # ---------------------------------------------------------------------------
 info "Configuring (build dir: $BUILD_DIR)..."
-meson setup "$BUILD_DIR" --wipe $BACKEND --prefix "/$PLATFORM" --bindir binaries --libdir libs "${MESON_OPTS[@]}"
+meson setup "$BUILD_DIR" --wipe $BACKEND --prefix "/$PLATFORM" --bindir binaries --libdir libs ${MESON_OPTS[@]+"${MESON_OPTS[@]}"}
 info "Compiling..."
 meson compile -C "$BUILD_DIR"
 info "Installing to ${BUILD_DIR}/${PLATFORM}/..."

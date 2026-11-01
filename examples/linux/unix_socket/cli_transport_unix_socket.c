@@ -26,6 +26,7 @@
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -240,6 +241,11 @@ void cli_unix_close(int32_t fd) {
  * The lock file itself stays on disk (removing it would let two servers lock different
  * files of the same name).
  *
+ * flock() rather than an fcntl() record lock: it belongs to the open file description, so
+ * a second listen in the same process is refused too, the lock survives fork() (e.g. a
+ * daemon) and closing an unrelated descriptor of the file does not release it. The
+ * descriptor is close-on-exec, and a symbolic link at the lock path is not followed.
+ *
  * @param[in]  path     Socket path.
  * @param[out] lock_fd  Receives the descriptor that holds the lock.
  *
@@ -253,21 +259,14 @@ static bool cli_unix_lock_path(const char *path, int32_t *lock_fd) {
   bool ok = (n > 0 && (size_t)n < sizeof(lock_path));
 
   if (ok) {
-    fd = open(lock_path, O_RDWR | O_CREAT, 0600);
+    fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     ok = (fd >= 0);
   }
-  if (ok) {
-    struct flock fl;
-
-    memset(&fl, 0, sizeof(fl));
-    fl.l_type = F_WRLCK; /* whole file */
-    fl.l_whence = SEEK_SET;
-    if (fcntl(fd, F_SETLK, &fl) != 0) {
-      int saved = errno;
-      close(fd);
-      errno = (saved == EACCES || saved == EAGAIN) ? EADDRINUSE : saved;
-      ok = false;
-    }
+  if (ok && flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    int saved = errno;
+    close(fd);
+    errno = (saved == EWOULDBLOCK) ? EADDRINUSE : saved;
+    ok = false;
   }
   if (ok) {
     *lock_fd = fd;

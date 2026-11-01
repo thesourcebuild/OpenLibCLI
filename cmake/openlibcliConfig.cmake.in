@@ -1,18 +1,8 @@
 @PACKAGE_INIT@
 
-get_filename_component(_OPENLIBCLI_DIR "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+# Imported targets of the installed library:
+#   OpenLibCLI::OpenLibCLI         shared library
+#   OpenLibCLI::OpenLibCLI_static  static library (when built with BUILD_LIB_STATIC)
+include("${CMAKE_CURRENT_LIST_DIR}/openlibcliTargets.cmake")
 
-set(openlibcli_VERSION "@PROJECT_VERSION@")
-
-add_library(OpenLibCLI STATIC
-    "${_OPENLIBCLI_DIR}/share/OpenLibCLI/src/cli.c"
-)
-target_include_directories(OpenLibCLI PUBLIC "${_OPENLIBCLI_DIR}/include")
-
-if(WIN32)
-    target_link_libraries(OpenLibCLI PUBLIC ws2_32)
-endif()
-
-add_library(OpenLibCLI::OpenLibCLI ALIAS OpenLibCLI)
-
-check_required_components(OpenLibCLI)
+check_required_components(openlibcli)

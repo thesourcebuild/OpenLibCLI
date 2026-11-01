@@ -14,6 +14,10 @@
  * Includes
  *=======================================================================================*/
 
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE /* flock(); must precede every system header */
+#endif
+
 #include "cli_transport_pipe.h"
 
 #if defined(_WIN32) || defined(_WIN64) || defined(__WINDOWS__) || defined(WIN32)
@@ -31,6 +35,7 @@
 #include <poll.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -100,7 +105,9 @@ static bool build_win_pipe_path(char *buf, int32_t buflen, const char *name);
 static bool win_reserve_name(const char *path, void **h_lock);
 static bool win_process_user(HANDLE process, win_token_user_union_t *buf, PSID *sid);
 static bool win_owner_only_security(SECURITY_ATTRIBUTES *sa);
+static bool win_process_is_self(ULONG pid);
 static bool win_pipe_server_is_self(HANDLE pipe);
+static bool win_pipe_client_is_self(HANDLE pipe);
 static BOOL win_overlapped_finish(HANDLE handle, OVERLAPPED *ov, BOOL started, DWORD timeout_ms,
                                   DWORD *count);
 #else
@@ -143,6 +150,9 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
 
   if (ok) {
     SECURITY_ATTRIBUTES sa;
+    /* The first listen must create the name: a pipe of this name made by anyone else
+     * beforehand would give its own security to every further instance. */
+    DWORD first = reserved_here ? (DWORD)FILE_FLAG_FIRST_PIPE_INSTANCE : 0U;
 
     /* Overlapped, so writes can time out. Only this user, only local clients. Unlimited
      * instances: a session ends by closing its instance (see cli_named_pipe_disconnect()),
@@ -151,12 +161,15 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
      * client still finds the server busy. */
     if (win_owner_only_security(&sa)) {
       handle = CreateNamedPipeA(
-          path, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+          path, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | first,
           PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
           PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, &sa);
       DWORD error = GetLastError();
       LocalFree(sa.lpSecurityDescriptor);
-      SetLastError(error);
+      /* With FILE_FLAG_FIRST_PIPE_INSTANCE, access denied means the name already exists. */
+      SetLastError((handle == INVALID_HANDLE_VALUE && first != 0U && error == ERROR_ACCESS_DENIED)
+                       ? ERROR_ALREADY_EXISTS
+                       : error);
     }
   }
   if (handle != INVALID_HANDLE_VALUE) {
@@ -186,6 +199,14 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
         (void)DisconnectNamedPipe(handle);
       } else {
         waiting = FALSE;
+      }
+
+      if (connected && !win_pipe_client_is_self(handle)) {
+        /* Not this user. The DACL keeps others out, but the name may have been taken over
+         * between two sessions, with that pipe's security: check every client. */
+        (void)DisconnectNamedPipe(handle);
+        connected = FALSE;
+        waiting = TRUE;
       }
     }
 
@@ -662,33 +683,59 @@ static bool win_owner_only_security(SECURITY_ATTRIBUTES *sa) {
 }
 
 /**
+ * @brief Check that process @p pid runs as this user.
+ *
+ * Reads the other process's token, which works between processes of the same user and
+ * elevation; a process of the same user at a different elevation (an administrator
+ * console) may not expose its token and then counts as another user.
+ *
+ * @param[in] pid  Process id (of the other end of a pipe).
+ *
+ * @return @c true if that process's user is ours; @c false otherwise or when it cannot
+ *         be determined.
+ */
+static bool win_process_is_self(ULONG pid) {
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+  bool same = false;
+
+  if (process != NULL) {
+    win_token_user_union_t theirs;
+    win_token_user_union_t mine;
+    PSID their_sid = NULL;
+    PSID my_sid = NULL;
+
+    same = win_process_user(process, &theirs, &their_sid) &&
+           win_process_user(GetCurrentProcess(), &mine, &my_sid) && EqualSid(their_sid, my_sid);
+    CloseHandle(process);
+  }
+
+  return same;
+}
+
+/**
  * @brief Check that the server end of @p pipe runs as this user.
  *
  * @param[in] pipe  Connected client handle.
  *
- * @return @c true if the server process's user is ours; @c false otherwise or when it
- *         cannot be determined.
+ * @return @c true if the server process's user is ours (see @c win_process_is_self()).
  */
 static bool win_pipe_server_is_self(HANDLE pipe) {
   ULONG pid = 0;
-  bool same = false;
 
-  if (GetNamedPipeServerProcessId(pipe, &pid)) {
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
-    if (process != NULL) {
-      win_token_user_union_t theirs;
-      win_token_user_union_t mine;
-      PSID their_sid = NULL;
-      PSID my_sid = NULL;
+  return GetNamedPipeServerProcessId(pipe, &pid) && win_process_is_self(pid);
+}
 
-      same = win_process_user(process, &theirs, &their_sid) &&
-             win_process_user(GetCurrentProcess(), &mine, &my_sid) &&
-             EqualSid(their_sid, my_sid);
-      CloseHandle(process);
-    }
-  }
+/**
+ * @brief Check that the client end of @p pipe runs as this user.
+ *
+ * @param[in] pipe  Connected server handle.
+ *
+ * @return @c true if the client process's user is ours (see @c win_process_is_self()).
+ */
+static bool win_pipe_client_is_self(HANDLE pipe) {
+  ULONG pid = 0;
 
-  return same;
+  return GetNamedPipeClientProcessId(pipe, &pid) && win_process_is_self(pid);
 }
 
 /**
@@ -752,6 +799,11 @@ static bool build_fifo_paths(const char *name, char *in_path, char *out_path, si
  * disk while holding it are leftovers. The lock file stays on disk (removing it would
  * let two servers lock different files of the same name).
  *
+ * flock() rather than an fcntl() record lock: it belongs to the open file description, so
+ * a second listen in the same process is refused too, the lock survives fork() (e.g. a
+ * daemon) and closing an unrelated descriptor of the file does not release it. The
+ * descriptor is close-on-exec, and a symbolic link at the lock path is not followed.
+ *
  * @param[in]  name     Base path.
  * @param[out] buf      Scratch buffer for the lock file path.
  * @param[in]  size     Size of @p buf.
@@ -768,21 +820,14 @@ static bool fifo_reserve_name(const char *name, char *buf, size_t size, int32_t 
   if (!ok) {
     errno = ENAMETOOLONG;
   } else {
-    fd = open(buf, O_RDWR | O_CREAT, 0600);
+    fd = open(buf, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     ok = (fd >= 0);
   }
-  if (ok) {
-    struct flock fl;
-
-    memset(&fl, 0, sizeof(fl));
-    fl.l_type = F_WRLCK; /* whole file */
-    fl.l_whence = SEEK_SET;
-    if (fcntl(fd, F_SETLK, &fl) != 0) {
-      int saved = errno;
-      close(fd);
-      errno = (saved == EACCES || saved == EAGAIN) ? EADDRINUSE : saved;
-      ok = false;
-    }
+  if (ok && flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    int saved = errno;
+    close(fd);
+    errno = (saved == EWOULDBLOCK) ? EADDRINUSE : saved;
+    ok = false;
   }
   if (ok) {
     *lock_fd = fd;
@@ -839,7 +884,10 @@ static bool fifo_is_private(int32_t fd) {
  *
  * Both FIFOs were opened without blocking, so whether a server is at the other end is
  * only known once it writes. A server that went away closes its read end of
- * <name>.in, which shows as an error on @p wfd.
+ * <name>.in, which shows as an error on @p wfd (Linux). Where poll() reports nothing
+ * for a descriptor watched with no events (macOS), that case ends at the deadline
+ * instead; it needs the server to die between opening <name>.in and blocking in its
+ * open of <name>.out, where a listening server waits for this client.
  *
  * @param[in] rfd       Client end of <name>.out (non-blocking).
  * @param[in] wfd       Client end of <name>.in.

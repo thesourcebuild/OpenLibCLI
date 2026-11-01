@@ -21,6 +21,25 @@ $generator = $null
 $buildType = "Release"
 $cmakeOpts = @()
 
+function Show-Help {
+    Write-Host
+    Write-Host "  OpenLibCLI - CMake build wrapper"
+    Write-Host "  =================================="
+    Write-Host
+    Write-Host "  Usage: scripts\build-helpers\build_cmake.ps1 [options]"
+    Write-Host
+    Write-Host    "  Options:"
+    Write-Host "    -G <generator>    CMake generator (e.g. Ninja, Visual Studio 17 2022)"
+    Write-Host "    Debug             Debug build"
+    Write-Host "    Release           Release build (default)"
+    Write-Host "    RelWithDebInfo    Release with debug info"
+    Write-Host "    BUILD_EXAMPLE_*=1|0  Pass through as -D option"
+    Write-Host "    -D<var>=<val>     Pass through as CMake -D flag"
+    Write-Host
+    Write-Host "  Output: $buildDir\windows\"
+    Write-Host
+}
+
 # --------------------------------------------------------------------------
 #  Parse arguments
 # --------------------------------------------------------------------------
@@ -42,10 +61,11 @@ while ($i -lt $args.Count) {
         continue
     }
 
-    switch ($a) {
-        "Debug"      { $buildType = "Debug"; $i++; continue }
-        "Release"    { $buildType = "Release"; $i++; continue }
-        "RelWithDebInfo" { $buildType = "RelWithDebInfo"; $i++; continue }
+    # Not a switch: 'continue' inside a switch block only leaves the switch.
+    if ($a -eq "Debug" -or $a -eq "Release" -or $a -eq "RelWithDebInfo") {
+        $buildType = $a
+        $i++
+        continue
     }
 
     # Translate BUILD_EXAMPLE_*=1|0 to -D flags
@@ -71,24 +91,6 @@ while ($i -lt $args.Count) {
     $i++
 }
 
-function Show-Help {
-    Write-Host
-    Write-Host "  OpenLibCLI - CMake build wrapper"
-    Write-Host "  =================================="
-    Write-Host
-    Write-Host "  Usage: scripts\build-helpers\build_cmake.ps1 [options]"
-    Write-Host
-    Write-Host    "  Options:"
-    Write-Host "    -G <generator>    CMake generator (e.g. Ninja, Visual Studio 17 2022)"
-    Write-Host "    Debug             Debug build"
-    Write-Host "    Release           Release build (default)"
-    Write-Host "    RelWithDebInfo    Release with debug info"
-    Write-Host "    BUILD_EXAMPLE_*=1|0  Pass through as -D option"
-    Write-Host "    -D<var>=<val>     Pass through as CMake -D flag"
-    Write-Host
-    Write-Host "  Output: $buildDir\windows\"
-    Write-Host
-}
 
 # --------------------------------------------------------------------------
 #  Auto-detect Ninja if no generator was explicitly given

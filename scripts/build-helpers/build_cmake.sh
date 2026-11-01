@@ -39,6 +39,7 @@ fi
 
 BUILD_DIR="build/cmake"
 CMAKE_GENERATOR=""
+GENERATOR_ARGS=()
 BUILD_TYPE="Release"
 CMAKE_OPTS=()
 
@@ -111,12 +112,12 @@ done
 if [ -z "$CMAKE_GENERATOR" ]; then
     if command -v ninja &>/dev/null; then
         info "ninja found - using Ninja generator"
-        CMAKE_GENERATOR="-G Ninja"
+        GENERATOR_ARGS=(-G Ninja)
     else
         info "ninja not found - using default generator"
     fi
 else
-    CMAKE_GENERATOR="-G $CMAKE_GENERATOR"
+    GENERATOR_ARGS=(-G "$CMAKE_GENERATOR") # one argument, even with spaces
 fi
 
 # ---------------------------------------------------------------------------
@@ -125,7 +126,7 @@ fi
 for _var in BUILD_EXAMPLE_TELNET BUILD_EXAMPLE_TCP BUILD_EXAMPLE_SERIAL BUILD_EXAMPLE_PIPE BUILD_EXAMPLE_UNIX_SOCKET BUILD_TESTING BUILD_ASAN; do
     if [ -n "${!_var+x}" ]; then
         _already=0
-        for _opt in "${CMAKE_OPTS[@]}"; do
+        for _opt in ${CMAKE_OPTS[@]+"${CMAKE_OPTS[@]}"}; do
             if [[ "$_opt" == "-D$_var="* ]]; then _already=1; break; fi
         done
         if [ "$_already" -eq 0 ]; then
@@ -147,7 +148,8 @@ if [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
 fi
 
 info "Configuring (BUILD_TYPE=$BUILD_TYPE)..."
-cmake -B "$BUILD_DIR" $CMAKE_GENERATOR -DCMAKE_BUILD_TYPE="$BUILD_TYPE" "${CMAKE_OPTS[@]}"
+cmake -B "$BUILD_DIR" ${GENERATOR_ARGS[@]+"${GENERATOR_ARGS[@]}"} -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    ${CMAKE_OPTS[@]+"${CMAKE_OPTS[@]}"}
 info "Compiling..."
 cmake --build "$BUILD_DIR" --config "$BUILD_TYPE"
 

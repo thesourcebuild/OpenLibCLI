@@ -6,7 +6,7 @@
 #  -------------
 #    build/gcc/linux/     GCC Linux builds
 #    build/gcc/macos/     Clang/GCC macOS builds
-#    build/gcc/embedded/  Cross-compiled bare-metal library
+#    build/gcc/embedded-baremetal/  Cross-compiled bare-metal library
 #
 #  Usage
 #  -----
@@ -16,7 +16,7 @@
 #    ./scripts/build-helpers/build_mingw_gcc.sh telnet                Telnet server example
 #    ./scripts/build-helpers/build_mingw_gcc.sh tcp                   TCP server example
 #    ./scripts/build-helpers/build_mingw_gcc.sh uart                  Serial server example (stdin sim)
-#    ./scripts/build-helpers/build_mingw_gcc.sh embedded              Cross-compile → build/gcc/embedded/
+#    ./scripts/build-helpers/build_mingw_gcc.sh embedded              Cross-compile → build/gcc/embedded-baremetal/
 #    ./scripts/build-helpers/build_mingw_gcc.sh run-telnet [PORT]     Build + run telnet server (default 2323)
 #    ./scripts/build-helpers/build_mingw_gcc.sh run-tcp [PORT]        Build + run TCP server (default 2323)
 #    ./scripts/build-helpers/build_mingw_gcc.sh run-serial            Build + run serial demo
@@ -108,6 +108,9 @@ while [ $# -gt 0 ]; do
         PORT=*)
             PORT="${1#PORT=}"
             ;;
+        [0-9]*)
+            PORT="$1" # run-telnet / run-tcp [port]
+            ;;
         *)
             TARGETS+=("$1")
             ;;
@@ -147,7 +150,7 @@ case "$TARGETS_STR" in
         echo "Output directories:"
         echo "  build/gcc/linux/     Linux host builds"
         echo "  build/gcc/macos/     macOS host builds"
-        echo "  build/gcc/embedded/  Bare-metal cross-compile"
+        echo "  build/gcc/embedded-baremetal/  Bare-metal cross-compile"
         echo ""
         echo "Targets:"
         echo "  (none)           Static + shared libraries + telnet + serial examples  [default]"
@@ -157,7 +160,7 @@ case "$TARGETS_STR" in
         echo "  tcp              TCP server example"
         echo "  uart             Serial server example (stdin simulation)"
         echo "  asan             Build everything with AddressSanitizer"
-        echo "  embedded         Cross-compile -> build/gcc/embedded/libs/libopenlibcli.a"
+        echo "  embedded         Cross-compile -> build/gcc/embedded-baremetal/libs/libopenlibcli.a"
         echo "  run-telnet [P]   Build + run telnet server on port P"
         echo "  run-tcp [P]      Build + run TCP server on port P"
         echo "  run-serial       Build + run serial demo"
@@ -195,11 +198,11 @@ case "$TARGETS_STR" in
     embedded)
         info "Cross-compiling for embedded target ..."
         info "CC        : ${CC:-gcc}"
-        info "Output    : build/gcc/embedded/"
+        info "Output    : build/gcc/embedded-baremetal/"
         echo ""
         "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="embedded-baremetal" \
-                    "${BUILD_VARS[@]}" embedded
-        ok "Embedded library: build/gcc/embedded/libs/libopenlibcli.a"
+                    ${BUILD_VARS[@]+"${BUILD_VARS[@]}"} embedded-baremetal
+        ok "Embedded library: build/gcc/embedded-baremetal/libs/libopenlibcli.a"
         ;;
 
     clean|clean-all|distclean|lib|shared|all|asan|cli_server_telnet|cli_server_tcp|telnet|tcp|cli_server_serial|uart|run-telnet|run-tcp|run-serial|run-pipe|run-unix-socket)
@@ -212,13 +215,15 @@ case "$TARGETS_STR" in
             info "ASAN      : active"
         fi
         echo ""
-        "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="$PLATFORM" "${BUILD_VARS[@]}" ${TARGETS_STR}
+        "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="$PLATFORM" PORT="$PORT" \
+                    ${BUILD_VARS[@]+"${BUILD_VARS[@]}"} ${TARGETS_STR}
         ok "Done."
         ;;
 
     *)
         warn "Unknown target '${TARGETS_STR}' — passing to ${MAKE_CMD} ..."
-        "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="$PLATFORM" "${BUILD_VARS[@]}" ${TARGETS_STR}
+        "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="$PLATFORM" PORT="$PORT" \
+                    ${BUILD_VARS[@]+"${BUILD_VARS[@]}"} ${TARGETS_STR}
         ;;
 
 esac

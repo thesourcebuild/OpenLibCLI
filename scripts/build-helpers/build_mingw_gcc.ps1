@@ -18,6 +18,47 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectRoot = Resolve-Path "$ScriptDir\..\.."
 Push-Location $ProjectRoot
 
+function Show-Help {
+    Write-Host
+    Write-Host "  OpenLibCLI - GCC / GNU Make build"
+    Write-Host "  =================================="
+    Write-Host
+    Write-Host "  Output directories:"
+    Write-Host "    build\gcc\windows\binaries"
+    Write-Host "    build\gcc\windows\libs"
+    Write-Host "    build\gcc\windows\obj"
+    Write-Host "    build\gcc\windows\*.map"
+    Write-Host
+    Write-Host "  Usage: scripts\build-helpers\build_mingw_gcc.ps1 [target] [BUILD_EXAMPLE_*=0|1 ...]"
+    Write-Host
+    Write-Host "  Targets:"
+    Write-Host "    (none)        Build static + shared libraries and examples  [default]"
+    Write-Host "    lib           Static library only"
+    Write-Host "    shared        Shared library only"
+    Write-Host "    telnet        Telnet server  (build\gcc\windows\binaries\cli_server_telnet.exe)"
+    Write-Host "    tcp           TCP server   (build\gcc\windows\binaries\cli_server_tcp.exe)"
+    Write-Host "    uart          Serial server demo  (build\gcc\windows\binaries\cli_server_serial.exe)"
+    Write-Host "    run-telnet    Build + run telnet server on port 2323"
+    Write-Host "    run-tcp       Build + run TCP server on port 2323"
+    Write-Host "    run-serial      Build + run serial / stdin demo"
+    Write-Host "    clean         Remove build\gcc\windows\ artefacts"
+    Write-Host "    clean-all     Remove entire build\ tree"
+    Write-Host "    help          Show this message"
+    Write-Host
+    Write-Host "  Transport switches:"
+    Write-Host "    BUILD_EXAMPLE_TELNET=0|1      Enable Telnet transport  (default: 1)"
+    Write-Host "    BUILD_EXAMPLE_TCP=0|1         Enable TCP transport     (default: 0)"
+    Write-Host "    BUILD_EXAMPLE_SERIAL=0|1      Enable serial transport  (default: 1)"
+    Write-Host "    BUILD_EXAMPLE_PIPE=0|1        Enable pipe transport    (default: 0)"
+    Write-Host "    BUILD_EXAMPLE_UNIX_SOCKET=0|1 Enable UNIX socket       (default: 0)"
+    Write-Host
+    Write-Host "  Examples:"
+    Write-Host "    scripts\build-helpers\build_mingw_gcc.ps1"
+    Write-Host "    scripts\build-helpers\build_mingw_gcc.ps1 BUILD_EXAMPLE_TCP=1"
+    Write-Host "    scripts\build-helpers\build_mingw_gcc.ps1 lib"
+    Write-Host
+}
+
 # --------------------------------------------------------------------------
 #  Argument parsing: separate BUILD_EXAMPLE_* vars from targets
 # --------------------------------------------------------------------------
@@ -72,46 +113,6 @@ if (-not $makeCmd) {
     exit 1
 }
 
-function Show-Help {
-    Write-Host
-    Write-Host "  OpenLibCLI - GCC / GNU Make build"
-    Write-Host "  =================================="
-    Write-Host
-    Write-Host "  Output directories:"
-    Write-Host "    build\gcc\windows\binaries"
-    Write-Host "    build\gcc\windows\libs"
-    Write-Host "    build\gcc\windows\obj"
-    Write-Host "    build\gcc\windows\*.map"
-    Write-Host
-    Write-Host "  Usage: scripts\build-helpers\build_mingw_gcc.ps1 [target] [BUILD_EXAMPLE_*=0|1 ...]"
-    Write-Host
-    Write-Host "  Targets:"
-    Write-Host "    (none)        Build static + shared libraries and examples  [default]"
-    Write-Host "    lib           Static library only"
-    Write-Host "    shared        Shared library only"
-    Write-Host "    telnet        Telnet server  (build\gcc\windows\binaries\cli_server_telnet.exe)"
-    Write-Host "    tcp           TCP server   (build\gcc\windows\binaries\cli_server_tcp.exe)"
-    Write-Host "    uart          Serial server demo  (build\gcc\windows\binaries\cli_server_serial.exe)"
-    Write-Host "    run-telnet    Build + run telnet server on port 2323"
-    Write-Host "    run-tcp       Build + run TCP server on port 2323"
-    Write-Host "    run-serial      Build + run serial / stdin demo"
-    Write-Host "    clean         Remove build\gcc\windows\ artefacts"
-    Write-Host "    clean-all     Remove entire build\ tree"
-    Write-Host "    help          Show this message"
-    Write-Host
-    Write-Host "  Transport switches:"
-    Write-Host "    BUILD_EXAMPLE_TELNET=0|1      Enable Telnet transport  (default: 1)"
-    Write-Host "    BUILD_EXAMPLE_TCP=0|1         Enable TCP transport     (default: 0)"
-    Write-Host "    BUILD_EXAMPLE_SERIAL=0|1      Enable serial transport  (default: 1)"
-    Write-Host "    BUILD_EXAMPLE_PIPE=0|1        Enable pipe transport    (default: 0)"
-    Write-Host "    BUILD_EXAMPLE_UNIX_SOCKET=0|1 Enable UNIX socket       (default: 0)"
-    Write-Host
-    Write-Host "  Examples:"
-    Write-Host "    scripts\build-helpers\build_mingw_gcc.ps1"
-    Write-Host "    scripts\build-helpers\build_mingw_gcc.ps1 BUILD_EXAMPLE_TCP=1"
-    Write-Host "    scripts\build-helpers\build_mingw_gcc.ps1 lib"
-    Write-Host
-}
 
 # --------------------------------------------------------------------------
 #  Version header

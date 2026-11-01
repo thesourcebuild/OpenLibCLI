@@ -18,7 +18,10 @@
  * clients wait (Windows: no free pipe instance; POSIX: the FIFO names are removed
  * until the next listen). On POSIX two clients that open the FIFOs in the very same
  * instant can both get in; only the owning user can open them at all. Clients check
- * that the server runs as the same user before sending anything.
+ * that the server runs as the same user before sending anything, and the Windows
+ * server checks every client the same way (POSIX: the FIFOs' mode does). On Windows
+ * this compares the processes' users, which a process of the same user at another
+ * elevation (an administrator console) may not reveal: such a pair is refused.
  *
  * **Anonymous pipes**
  *

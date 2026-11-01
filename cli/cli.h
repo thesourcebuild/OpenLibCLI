@@ -766,6 +766,8 @@ struct cli_s {
   cli_time_t auth_lockout_started_ts; /**< Timestamp when the current lockout began. */
   cli_auth_state_enum_t auth_resume_state; /**< State restored after the enable prompt or a
                                               lockout; @c CLI_AUTH_USERNAME means re-login. */
+  bool auth_requested; /**< @c cli_request_auth() during a (re)start: the session begins at
+                            the login prompt even without @c require_auth. */
   bool require_auth;                  /**< True when the session requires login before running
                                          commands. */
   cli_auth_fn authorization_cb;       /**< Custom auth callback; overrides the local user table. */
@@ -1352,12 +1354,11 @@ OPENLIBCLI_API void cli_set_auth_lockout_duration(cli_struct_t *cli, uint32_t se
  *                        characters, @c ?, @c | and @c ".
  * @param[in] callback    Handler invoked when the command is executed, or
  *                        @c NULL for pure sub-menu nodes.
- * @param[in] privilege   CLI mode in which the command is visible
- *                        (@c CLI_MODE_ANY for all modes). @c CLI_PRIV_UNPRIVILEGED or @c
- * CLI_PRIV_PRIVILEGED.
- * @param[in] mode        CLI mode in which the command is visible
- *                        (@c CLI_MODE_ANY for all modes). @c CLI_MODE_ANY or a specific mode
- * constant.
+ * @param[in] privilege   Minimum privilege level needed to see and run the command
+ *                        (@c CLI_PRIV_USER / @c CLI_PRIV_UNPRIVILEGED or
+ *                        @c CLI_PRIV_PRIVILEGED).
+ * @param[in] mode        CLI mode in which the command is visible: a specific mode
+ *                        constant, or @c CLI_MODE_ANY for all modes.
  * @param[in] help        Short help string shown by the @c ? / help commands,
  *                        or @c NULL for no help text.
  *
@@ -1532,9 +1533,11 @@ OPENLIBCLI_API void cli_tick_stats_reset(cli_struct_t *cli);
 /**
  * @brief Execute a command string programmatically.
  *
- * Copies @p cmd into the internal input buffer, runs the full execution
- * pipeline (trim, tokenize, resolve, callback), and resets the input
- * buffer.  Output is still sent through the active transport.
+ * Copies @p cmd into the internal input buffer and runs the full execution
+ * pipeline (trim, tokenize, resolve, callback). Output is still sent through the
+ * active transport. Called from outside any command (a callback, the main loop)
+ * while the session runs, the output starts on a new line and the prompt, with
+ * whatever the user had typed, is shown again afterwards.
  *
  * Arguments containing spaces, @c | or @c ? are written in double quotes
  * (@c "a b"); inside quotes @c \\" and @c \\\\ escape a quote and a backslash.

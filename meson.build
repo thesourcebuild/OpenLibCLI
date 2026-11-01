@@ -35,14 +35,12 @@ cc = meson.get_compiler('c')
 is_windows = host_machine.system() == 'windows'
 is_linux   = host_machine.system() == 'linux'
 
-# ── POSIX feature test macros for c99: POSIX.1-2008 (nanosleep, clock_gettime, lstat,
-#    mkfifo, poll, ...); on macOS also the extensions a POSIX level hides (getpeereid,
-#    SO_NOSIGPIPE) ──
-if not is_windows
-  add_project_arguments('-D_POSIX_C_SOURCE=200809L', language: 'c')
-endif
-if host_machine.system() == 'darwin'
-  add_project_arguments('-D_DARWIN_C_SOURCE', language: 'c')
+# ── Feature-test macros: c99 makes glibc / musl hide POSIX (nanosleep, clock_gettime,
+#    lstat, mkfifo, ...) and BSD extras (flock); _DEFAULT_SOURCE restores the normal set.
+#    macOS and the BSDs show everything without a macro (a POSIX level would hide
+#    getpeereid() and SO_NOSIGPIPE there). ──
+if is_linux
+  add_project_arguments('-D_DEFAULT_SOURCE', language: 'c')
 endif
 
 # ── Library (both static + shared) ─────────────────────────────────────────

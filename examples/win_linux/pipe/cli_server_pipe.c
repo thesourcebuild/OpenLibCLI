@@ -32,12 +32,12 @@
  *
  * **Build Linux / macOS** (from the repository root)
  * @code
- *   gcc -std=c99 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Icli          \
+ *   gcc -std=c99 -D_DEFAULT_SOURCE -Wall -Wextra -Icli                  \
  *       cli/cli.c cli/utils/cli_args_parse.c examples/shared/cli_demo_setup.c \
  *       examples/win_linux/pipe/cli_transport_pipe.c                     \
  *       examples/win_linux/pipe/cli_server_pipe.c -lpthread -o cli_server_pipe
  * @endcode
- * (macOS: add @c -D_DARWIN_C_SOURCE.)
+ * (@c -D_DEFAULT_SOURCE is for glibc / musl; macOS and the BSDs need no macro.)
  *
  * **Build Windows (MinGW)** (from the repository root)
  * @code

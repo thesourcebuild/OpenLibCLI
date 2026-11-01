@@ -36,7 +36,7 @@ die()   { echo -e "${RED}[build] ERROR:${RST} $*" >&2; exit 1; }
 run_script() {
     local label="$1" script="$2"; shift 2
     info "Toolchain: $label"
-    "$SCRIPT_DIR/$script" "${REST[@]}"
+    "$SCRIPT_DIR/$script" ${REST[@]+"${REST[@]}"}
 }
 
 auto_detect() {
