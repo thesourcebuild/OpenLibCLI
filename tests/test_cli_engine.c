@@ -2053,6 +2053,116 @@ static void test_partial_secret_erased(void) {
 }
 #endif
 
+/* Round 7 regressions ------------------------------------------------------------------*/
+
+#define TEST_MODE_IF (CLI_MODE_USER_BASE + 7)
+
+static int8_t cmd_interface(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                            const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  return cli_set_mode(cli, TEST_MODE_IF); /* its subcommands live in TEST_MODE_IF */
+}
+
+static void test_submenu_entered_after_mode_switch(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("submenu_entered_after_mode_switch");
+  session_new();
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "interface", cmd_interface, CLI_PRIV_USER,
+                      CLI_MODE_EXEC, "Interface");
+  (void)cli_add_command(&s_cli, h, "shutdown", cmd_name, CLI_PRIV_USER, TEST_MODE_IF, "Shut");
+  session_start();
+
+  type("interface\r");
+  ASSERT_EQ(s_cli.context, h);
+  ASSERT_EQ(cli_get_mode(&s_cli), TEST_MODE_IF);
+  out_clear();
+  type("shutdown\r");
+  ASSERT_OUT("RAN:shutdown");
+  type("exit\r");
+  ASSERT_EQ(s_cli.context, CLI_CMD_ROOT);
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_EXEC);
+  TEST_END();
+}
+
+static void test_new_mode_starts_at_root(void) {
+  cli_cmd_handle_t net;
+
+  TEST_START("new_mode_starts_at_root");
+  session_new();
+  /* A submenu that stays in exec mode. */
+  net = cli_add_command(&s_cli, CLI_CMD_ROOT, "net", cmd_name, CLI_PRIV_USER, CLI_MODE_EXEC, "");
+  (void)cli_add_command(&s_cli, net, "ping", cmd_name, CLI_PRIV_USER, CLI_MODE_EXEC, "");
+  session_start();
+
+  type("net\r");
+  ASSERT_EQ(s_cli.context, net);
+  out_clear();
+  type("enable\r"); /* no secret: privileged exec, which has nothing to do with 'net' */
+  ASSERT_EQ(s_cli.context, CLI_CMD_ROOT);
+  ASSERT_OUT("rtr# ");
+  type("exit\r"); /* back where 'enable' was typed */
+  ASSERT_EQ(s_cli.context, net);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  TEST_END();
+}
+
+static void test_unusable_container_hidden(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("unusable_container_hidden");
+  session_new();
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "debug", NULL, CLI_PRIV_USER, CLI_MODE_ANY, "Debug");
+  (void)cli_add_command(&s_cli, h, "memory", cmd_name, CLI_PRIV_PRIVILEGED, CLI_MODE_ANY, "");
+  session_start();
+
+  type("debug memory\r");
+  ASSERT_OUT("% Unknown command: debug");
+  out_clear();
+  type("help\r");
+  ASSERT_NOT_OUT("debug");
+
+  /* Once a subcommand is usable, the container is too. */
+  type("enable\r");
+  out_clear();
+  type("debug memory\r");
+  ASSERT_OUT("RAN:memory");
+  TEST_END();
+}
+
+#if CLI_ENABLE_AUTH
+static int8_t enable_relogin_cb(cli_struct_t *cli, const char *user, const char *pass) {
+  (void)user;
+  if (strcmp(pass, "s3") != 0) {
+    cli_request_auth(cli); /* a wrong secret logs the user out */
+    return CLI_ERR_AUTH;
+  }
+  return CLI_OK;
+}
+
+static void test_enable_callback_relogin(void) {
+  TEST_START("enable_callback_relogin");
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_enable_privilege_cb(&s_cli, enable_relogin_cb);
+  session_start();
+
+  type("admin\rpw\r");
+  out_clear();
+  type("enable\rwrong\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  ASSERT_EQ(out_count("Username: "), 1);
+  ASSERT_NOT_OUT("Access denied");
+  out_clear();
+  type("echo hi\r"); /* a username now, not a command */
+  ASSERT_NOT_OUT("ARGS [hi]");
+  TEST_END();
+}
+#endif
+
 static void test_null_safety(void) {
   TEST_START("null_safety");
   session_new();
@@ -2207,6 +2317,12 @@ int main(void) {
 #endif
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_partial_secret_erased);
+#endif
+  RUN_SUITE(test_submenu_entered_after_mode_switch);
+  RUN_SUITE(test_new_mode_starts_at_root);
+  RUN_SUITE(test_unusable_container_hidden);
+#if CLI_ENABLE_AUTH
+  RUN_SUITE(test_enable_callback_relogin);
 #endif
 
   printf("\n--- robustness ---\n");

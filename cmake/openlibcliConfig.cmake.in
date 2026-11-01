@@ -5,4 +5,5 @@
 #   OpenLibCLI::OpenLibCLI_static  static library (when built with BUILD_LIB_STATIC)
 include("${CMAKE_CURRENT_LIST_DIR}/openlibcliTargets.cmake")
 
-check_required_components(openlibcli)
+# The name find_package() was called with (OpenLibCLI or openlibcli).
+check_required_components(${CMAKE_FIND_PACKAGE_NAME})

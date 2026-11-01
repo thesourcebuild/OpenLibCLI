@@ -65,6 +65,35 @@ if is_windows
   ws2_dep = cc.find_library('ws2_32', required : true)
 endif
 
+# ── Public headers: include/OpenLibCLI/ (config/, utils/ as in the source tree) ──
+install_headers('cli/cli.h', 'cli/cli_env_detect.h', 'cli/cli_version.h',
+    subdir : 'OpenLibCLI')
+install_headers('cli/config/cli_config.h', 'cli/config/cli_embedded_config.h',
+    subdir : 'OpenLibCLI/config')
+install_headers('cli/utils/cli_args_parse.h',
+    subdir : 'OpenLibCLI/utils')
+
+# ── Installed examples find the shared library through an rpath relative to their own
+#    directory (bindir -> libdir), so they run wherever the installation is. ──
+fs = import('fs')
+example_rpath = ''
+if not is_windows
+  bindir = get_option('bindir')
+  libdir = get_option('libdir')
+  if fs.is_absolute(libdir) or fs.is_absolute(bindir)
+    example_rpath = fs.is_absolute(libdir) ? libdir : get_option('prefix') / libdir
+  else
+    up = ''
+    foreach part : bindir.split('/')
+      if part != '' and part != '.'
+        up += '../'
+      endif
+    endforeach
+    origin = host_machine.system() == 'darwin' ? '@loader_path' : '$ORIGIN'
+    example_rpath = origin / (up + libdir)
+  endif
+endif
+
 # ── Examples ──────────────────────────────────────────────────────────────
 if get_option('BUILD_EXAMPLES')
   demo_src = files('examples/shared/cli_demo_setup.c')
@@ -77,6 +106,7 @@ if get_option('BUILD_EXAMPLES')
         demo_src,
         include_directories : inc,
         link_with : openlibcli_lib,
+        install_rpath : example_rpath,
         install : true,
     )
   endif
@@ -93,6 +123,7 @@ if get_option('BUILD_EXAMPLES')
         demo_src,
         include_directories : inc,
         link_with : openlibcli_lib,
+        install_rpath : example_rpath,
         dependencies : telnet_deps,
         install : true,
     )
@@ -110,6 +141,7 @@ if get_option('BUILD_EXAMPLES')
         demo_src,
         include_directories : inc,
         link_with : openlibcli_lib,
+        install_rpath : example_rpath,
         dependencies : tcp_deps,
         install : true,
     )
@@ -129,6 +161,7 @@ if get_option('BUILD_EXAMPLES')
         demo_src,
         include_directories : inc,
         link_with : openlibcli_lib,
+        install_rpath : example_rpath,
         dependencies : pipe_deps,
         install : true,
     )
@@ -142,6 +175,7 @@ if get_option('BUILD_EXAMPLES')
         demo_src,
         include_directories : inc,
         link_with : openlibcli_lib,
+        install_rpath : example_rpath,
         dependencies : dependency('threads', required : true),
         install : true,
     )

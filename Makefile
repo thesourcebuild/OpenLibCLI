@@ -47,9 +47,19 @@
 # ---------------------------------------------------------------------------
 CC    ?= gcc
 AR    ?= ar
-ifeq ($(OS),Windows_NT)
-    RM     = cmd /c del /f /q
-    RMDIR ?= cmd /c rd /s /q
+
+# Recipe shell. Native Windows make (MAKE_HOST *-mingw32) runs recipes with any sh.exe it
+# finds on PATH (Git, MSYS2, busybox) and cmd.exe otherwise; the Windows commands used
+# below need cmd.exe, so it is selected explicitly. MSYS2 / Cygwin make are POSIX
+# environments: sh with the POSIX commands, as on Linux.
+ifneq ($(findstring mingw32,$(MAKE_HOST)),)
+SHELL     := cmd.exe
+CMD_SHELL := 1
+endif
+
+ifeq ($(CMD_SHELL),1)
+    RM     = del /f /q
+    RMDIR  = rd /s /q
     COPY   = copy /y
 else
     RM    ?= rm -f
@@ -74,6 +84,8 @@ else
     _UNAME := $(shell uname -s 2>/dev/null || echo linux)
     ifeq ($(_UNAME),Darwin)
         PLATFORM ?= macos
+    else ifneq ($(filter FreeBSD NetBSD OpenBSD DragonFly,$(_UNAME)),)
+        PLATFORM ?= bsd
     else
         PLATFORM ?= linux
     endif
@@ -92,6 +104,10 @@ else ifeq ($(PLATFORM),embedded-baremetal)
     EXE_EXT    :=
 else ifeq ($(PLATFORM),macos)
     BUILD_DIR  := $(BUILD_BASE)/macos
+    PLAT_LIBS  :=
+    EXE_EXT    :=
+else ifeq ($(PLATFORM),bsd)
+    BUILD_DIR  := $(BUILD_BASE)/bsd
     PLAT_LIBS  :=
     EXE_EXT    :=
 else
@@ -126,8 +142,9 @@ CFLAGS += -I$(INC_DIR)
 # Feature-test macros: -std=c99 makes glibc / musl hide POSIX (nanosleep, clock_gettime,
 # lstat, mkfifo, ...) and the BSD extras the examples use (flock). _DEFAULT_SOURCE gives
 # the system's normal set back. macOS and the BSDs show everything without a macro; a
-# POSIX level there would hide getpeereid() and SO_NOSIGPIPE instead.
-ifeq ($(_UNAME),Linux)
+# POSIX level there would hide getpeereid() and SO_NOSIGPIPE instead. Chosen by the target
+# platform, so a cross build for Linux gets it too.
+ifeq ($(PLATFORM),linux)
 CFLAGS += -D_DEFAULT_SOURCE
 endif
 
@@ -211,9 +228,16 @@ SHARED_IMPLIB_OUT :=
 SHARED_LINK_FLAGS := -shared -Wl,-soname,libopenlibcli.so
 endif
 
-# How examples link the shared library. Windows: the DLL is copied next to them. Elsewhere
-# by name, with an rpath relative to the executable, so they run from any directory (not
-# only the repository root, as a path recorded at link time would require).
+# Copy of the shared library next to the examples (a Windows DLL is found there).
+SHARED_RUNTIME := $(BIN_DIR)/$(notdir $(SHARED_LIB_OUT))
+
+# What the examples link: the shared library, or the static one when the shared library is
+# not built. The shared library is linked by name with an rpath relative to the executable,
+# so the examples run from any directory (Windows: the DLL copied next to them).
+ifeq ($(BUILD_LIB_SHARED),1)
+LIB_OUT          := $(SHARED_LIB_OUT)
+LIB_RUNTIME      := $(SHARED_RUNTIME)
+EXAMPLE_LIB_DEFS := -DCLI_SHARED
 ifeq ($(PLATFORM),windows)
 LIB_LINK := $(SHARED_LIB_OUT)
 else ifeq ($(PLATFORM),macos)
@@ -221,7 +245,12 @@ LIB_LINK := -L$(LIB_DIR) -lopenlibcli -Wl,-rpath,@loader_path/../libs
 else
 LIB_LINK := -L$(LIB_DIR) -lopenlibcli -Wl,-rpath,'$$ORIGIN/../libs'
 endif
-LIB_OUT      := $(SHARED_LIB_OUT)
+else
+LIB_OUT          := $(STATIC_LIB_OUT)
+LIB_RUNTIME      :=
+EXAMPLE_LIB_DEFS :=
+LIB_LINK         := $(STATIC_LIB_OUT)
+endif
 TELNET_BIN   := $(BIN_DIR)/cli_server_telnet$(EXE_EXT)
 TCP_BIN      := $(BIN_DIR)/cli_server_tcp$(EXE_EXT)
 SERIAL_BIN   := $(BIN_DIR)/cli_server_serial$(EXE_EXT)
@@ -236,8 +265,8 @@ SHARED_CFLAGS += -fPIC
 endif
 endif
 
-# Consumer CFLAGS for examples linking against the shared library
-EXAMPLE_CFLAGS := $(CFLAGS) -DCLI_SHARED
+# Consumer CFLAGS for the examples (CLI_SHARED when they link the shared library)
+EXAMPLE_CFLAGS := $(CFLAGS) $(EXAMPLE_LIB_DEFS)
 
 # ---------------------------------------------------------------------------
 #  Library sources → objects
@@ -343,25 +372,26 @@ endif
 # ---------------------------------------------------------------------------
 #  Static library  (host)
 # ---------------------------------------------------------------------------
-ifeq ($(BUILD_LIB_STATIC),1)
+# 'lib' and 'shared' can always be built on request; BUILD_LIB_STATIC / BUILD_LIB_SHARED
+# only choose what 'all' builds.
 .PHONY: lib
 lib: $(STATIC_LIB_OUT)
 
 $(STATIC_LIB_OUT): $(LIB_OBJS) | $(LIB_DIR)
 	$(AR) $(ARFLAGS) $@ $^
-endif
 
-ifeq ($(BUILD_LIB_SHARED),1)
 .PHONY: shared
-shared: $(SHARED_LIB_OUT)
+shared: $(SHARED_LIB_OUT) $(SHARED_RUNTIME)
 
-$(SHARED_LIB_OUT): $(LIB_SRCS) | $(BIN_DIR) $(LIB_DIR)
+$(SHARED_LIB_OUT): $(LIB_SRCS) | $(LIB_DIR)
 	$(CC) $(SHARED_CFLAGS) $(SHARED_LINK_FLAGS) -o $@ $(LIB_SRCS) $(PLAT_LIBS)
-ifeq ($(OS),Windows_NT)
-	$(COPY) $(subst /,\,$@) $(subst /,\,$(BIN_DIR))
+
+# A rule of its own: a copy that failed is made again by the next build.
+$(SHARED_RUNTIME): $(SHARED_LIB_OUT) | $(BIN_DIR)
+ifeq ($(CMD_SHELL),1)
+	$(COPY) $(subst /,\,$<) $(subst /,\,$@)
 else
-	$(COPY) $@ $(BIN_DIR)/
-endif
+	$(COPY) $< $@
 endif
 
 # ---------------------------------------------------------------------------
@@ -379,7 +409,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 ifeq ($(BUILD_EXAMPLE_TELNET),1)
 cli_server_telnet telnet: $(TELNET_BIN)
 
-$(TELNET_BIN): $(EXAMPLE_DIR)/win_linux/telnet/cli_server_telnet.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) | $(BIN_DIR)
+$(TELNET_BIN): $(EXAMPLE_DIR)/win_linux/telnet/cli_server_telnet.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
 	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/telnet/cli_server_telnet.c $(EXAMPLE_DIR)/win_linux/telnet/cli_transport_telnet.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_telnet.map -o $@
 else
 cli_server_telnet telnet:
@@ -394,7 +424,7 @@ endif
 ifeq ($(BUILD_EXAMPLE_TCP),1)
 cli_server_tcp tcp: $(TCP_BIN)
 
-$(TCP_BIN): $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.c $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.h $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) | $(BIN_DIR)
+$(TCP_BIN): $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.c $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.h $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
 	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.c $(EXAMPLE_DIR)/win_linux/tcp/cli_transport_tcp.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_tcp.map -o $@
 else
 cli_server_tcp tcp:
@@ -409,7 +439,7 @@ endif
 ifeq ($(BUILD_EXAMPLE_SERIAL),1)
 cli_server_serial uart: $(SERIAL_BIN)
 
-$(SERIAL_BIN): $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.c $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.h $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) | $(BIN_DIR)
+$(SERIAL_BIN): $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.c $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.h $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
 	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.c $(EXAMPLE_DIR)/win_linux/serial/cli_transport_serial.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_serial.map -o $@
 else
 cli_server_serial uart:
@@ -430,7 +460,7 @@ else
 PIPE_THREAD_LIBS := -lpthread
 endif
 
-$(PIPE_BIN): $(EXAMPLE_DIR)/win_linux/pipe/cli_server_pipe.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) | $(BIN_DIR)
+$(PIPE_BIN): $(EXAMPLE_DIR)/win_linux/pipe/cli_server_pipe.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
 	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/pipe/cli_server_pipe.c $(EXAMPLE_DIR)/win_linux/pipe/cli_transport_pipe.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(PIPE_THREAD_LIBS) \
 	    $(MAP_FLAG)$(BUILD_DIR)/cli_server_pipe.map -o $@
 else
@@ -447,7 +477,7 @@ ifneq ($(PLATFORM),windows)
 .PHONY: cli_server_unix_socket unix-socket
 cli_server_unix_socket unix-socket: $(UNIX_SOCK_BIN)
 
-$(UNIX_SOCK_BIN): $(EXAMPLE_DIR)/linux/unix_socket/cli_server_unix_socket.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) | $(BIN_DIR)
+$(UNIX_SOCK_BIN): $(EXAMPLE_DIR)/linux/unix_socket/cli_server_unix_socket.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
 	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/linux/unix_socket/cli_server_unix_socket.c $(EXAMPLE_DIR)/linux/unix_socket/cli_transport_unix_socket.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) -lpthread \
 	    $(MAP_FLAG)$(BUILD_DIR)/cli_server_unix_socket.map -o $@
 else
@@ -515,7 +545,7 @@ asan:
 .PHONY: run-telnet
 ifeq ($(BUILD_EXAMPLE_TELNET),1)
 run-telnet: $(TELNET_BIN)
-ifeq ($(OS),Windows_NT)
+ifeq ($(CMD_SHELL),1)
 	@$(subst /,\,$(TELNET_BIN)) $(PORT)
 else
 	@$(TELNET_BIN) $(PORT)
@@ -529,7 +559,7 @@ endif
 .PHONY: run-tcp
 ifeq ($(BUILD_EXAMPLE_TCP),1)
 run-tcp: $(TCP_BIN)
-ifeq ($(OS),Windows_NT)
+ifeq ($(CMD_SHELL),1)
 	@$(subst /,\,$(TCP_BIN)) $(PORT)
 else
 	@$(TCP_BIN) $(PORT)
@@ -543,7 +573,7 @@ endif
 .PHONY: run-serial
 ifeq ($(BUILD_EXAMPLE_SERIAL),1)
 run-serial: $(SERIAL_BIN)
-ifeq ($(OS),Windows_NT)
+ifeq ($(CMD_SHELL),1)
 	@$(subst /,\,$(SERIAL_BIN))
 else
 	@$(SERIAL_BIN)
@@ -557,7 +587,7 @@ endif
 .PHONY: run-pipe
 ifeq ($(BUILD_EXAMPLE_PIPE),1)
 run-pipe: $(PIPE_BIN)
-ifeq ($(OS),Windows_NT)
+ifeq ($(CMD_SHELL),1)
 	@$(subst /,\,$(PIPE_BIN)) anon
 else
 	@$(PIPE_BIN) anon
@@ -572,7 +602,7 @@ ifeq ($(BUILD_EXAMPLE_UNIX_SOCKET),1)
 ifneq ($(PLATFORM),windows)
 .PHONY: run-unix-socket
 run-unix-socket: $(UNIX_SOCK_BIN)
-ifeq ($(OS),Windows_NT)
+ifeq ($(CMD_SHELL),1)
 	@$(subst /,\,$(UNIX_SOCK_BIN))
 else
 	@$(UNIX_SOCK_BIN)
@@ -594,14 +624,14 @@ endif
 #  Create output directories
 # ---------------------------------------------------------------------------
 $(sort $(BUILD_DIR) $(BIN_DIR) $(LIB_DIR) $(EMBED_DIR)):
-ifeq ($(OS),Windows_NT)
+ifeq ($(CMD_SHELL),1)
 	cmd /c if not exist "$(subst /,\,$@)" mkdir "$(subst /,\,$@)"
 else
 	mkdir -p $@
 endif
 
 $(sort $(OBJ_DIR) $(EMBED_OBJ_DIR)):
-ifeq ($(OS),Windows_NT)
+ifeq ($(CMD_SHELL),1)
 	cmd /c if not exist "$(subst /,\,$@)" mkdir "$(subst /,\,$@)"
 	cmd /c if not exist "$(subst /,\,$(@)\utils)" if exist "$(subst /,\,$(@))" mkdir "$(subst /,\,$(@)\utils)"
 else
@@ -613,23 +643,19 @@ endif
 #  Clean — current platform only
 # ---------------------------------------------------------------------------
 .PHONY: clean
+# Loose files in the output directory. Make expands the patterns itself, so the commands
+# get plain file names: no wildcard depends on how a shell treats "\*" or "/".
+CLEAN_FILES = $(wildcard $(addprefix $(BUILD_DIR)/*,.map .obj .o .d .a .lib .so .dll .dylib \
+                                     .exe .out .app .pdb .ilk))
+CLEAN_DIRS  = $(wildcard $(BIN_DIR) $(LIB_DIR) $(OBJ_DIR))
+
 clean:
-ifeq ($(OS),Windows_NT)
-	-$(RMDIR) $(subst /,\,$(BIN_DIR))
-	-$(RMDIR) $(subst /,\,$(LIB_DIR))
-	-$(RMDIR) $(subst /,\,$(OBJ_DIR))
-	-$(RM) $(subst /,\,$(BUILD_DIR)/*.map $(BUILD_DIR)/*.obj $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d \
-	      $(BUILD_DIR)/*.a $(BUILD_DIR)/*.lib $(BUILD_DIR)/*.so $(BUILD_DIR)/*.dll $(BUILD_DIR)/*.dylib \
-	      $(BUILD_DIR)/*.exe $(BUILD_DIR)/*.out $(BUILD_DIR)/*.app \
-	      $(BUILD_DIR)/*.pdb $(BUILD_DIR)/*.ilk)
+ifeq ($(CMD_SHELL),1)
+	$(if $(CLEAN_DIRS),$(RMDIR) $(subst /,\,$(CLEAN_DIRS)))
+	$(if $(CLEAN_FILES),$(RM) $(subst /,\,$(CLEAN_FILES)))
 else
-	-$(RMDIR) $(BIN_DIR)
-	-$(RMDIR) $(LIB_DIR)
-	-$(RMDIR) $(OBJ_DIR)
-	-$(RM) $(BUILD_DIR)/*.map $(BUILD_DIR)/*.obj $(BUILD_DIR)/*.o $(BUILD_DIR)/*.d \
-	      $(BUILD_DIR)/*.a $(BUILD_DIR)/*.lib $(BUILD_DIR)/*.so $(BUILD_DIR)/*.dll $(BUILD_DIR)/*.dylib \
-	      $(BUILD_DIR)/*.exe $(BUILD_DIR)/*.out $(BUILD_DIR)/*.app \
-	      $(BUILD_DIR)/*.pdb $(BUILD_DIR)/*.ilk
+	$(if $(CLEAN_DIRS),$(RMDIR) $(CLEAN_DIRS))
+	$(if $(CLEAN_FILES),$(RM) $(CLEAN_FILES))
 endif
 	@echo "Cleaned contents of $(BUILD_DIR)/ (folder kept)."
 
@@ -638,7 +664,7 @@ endif
 # ---------------------------------------------------------------------------
 .PHONY: clean-all distclean
 clean-all distclean:
-ifeq ($(OS),Windows_NT)
+ifeq ($(CMD_SHELL),1)
 	-$(RMDIR) $(subst /,\,$(BUILD_BASE))
 else
 	-$(RMDIR) $(BUILD_BASE)

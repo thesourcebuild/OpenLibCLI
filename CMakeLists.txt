@@ -1,11 +1,14 @@
 cmake_minimum_required(VERSION 3.14)
 project(OpenLibCLI C)
 
+# Link-time optimisation for the shared library and the programs built here (see the end
+# of this file). Not for the static library: it is installed for other builds, and its
+# objects would hold compiler-specific LTO bytecode that another compiler, compiler version
+# or linker cannot link. A CMAKE_INTERPROCEDURAL_OPTIMIZATION given by the user applies to
+# every target as usual.
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
-if(ipo_supported)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-else()
+if(NOT ipo_supported)
     message(STATUS "LTO not supported: ${ipo_error}")
 endif()
 
@@ -280,6 +283,18 @@ if(NOT CMAKE_CROSSCOMPILING)
 endif()
 
 # =========================================================================
+#  Link-time optimisation (see the top of this file)
+# =========================================================================
+if(ipo_supported AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+    foreach(_t cli_shared test_cli_args_parse test_cli_engine cli_server_telnet cli_server_tcp
+               cli_server_serial cli_server_pipe cli_server_unix_socket)
+        if(TARGET ${_t})
+            set_property(TARGET ${_t} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+        endif()
+    endforeach()
+endif()
+
+# =========================================================================
 #  Install rules + CMake package support (find_package)
 # =========================================================================
 include(CMakePackageConfigHelpers)
@@ -311,19 +326,22 @@ install(EXPORT openlibcliTargets
 
 # --- Config version file ---
 write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/openlibcliConfigVersion.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/openlibcli-config-version.cmake"
     VERSION       "${PROJECT_VERSION}"
     COMPATIBILITY SameMajorVersion)
 
 # --- Config file (from template) ---
+# Lower case with hyphens: the one spelling find_package() looks for under any case of the
+# package name, so find_package(OpenLibCLI) and find_package(openlibcli) both work on
+# case-sensitive file systems.
 configure_package_config_file(
     "${CMAKE_SOURCE_DIR}/cmake/openlibcliConfig.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/openlibcliConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/openlibcli-config.cmake"
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenLibCLI)
 
 install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/openlibcliConfig.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/openlibcliConfigVersion.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/openlibcli-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/openlibcli-config-version.cmake"
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenLibCLI)
 
 # =========================================================================

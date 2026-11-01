@@ -64,6 +64,7 @@ function Show-Help {
 # --------------------------------------------------------------------------
 $targetParts = @()
 $buildVars = @()
+$port = $null
 
 $i = 0
 while ($i -lt $args.Count) {
@@ -89,12 +90,19 @@ while ($i -lt $args.Count) {
         continue
     }
 
+    # run-telnet / run-tcp [port], or PORT=<n>: the port for make
+    if ($a -match '^(?:PORT=)?(\d+)$') {
+        $port = $matches[1]
+        $i++
+        continue
+    }
+
     $targetParts += $a
     $i++
 }
 
-if ($targetParts.Count -eq 0) { $targets = "all" }
-else { $targets = $targetParts -join " " }
+if ($targetParts.Count -eq 0) { $targetParts = @("all") }
+$targets = $targetParts -join " " # for display; make gets each target separately
 
 # --------------------------------------------------------------------------
 #  Locate GNU Make
@@ -140,7 +148,9 @@ if ($buildVars.Count -gt 0) {
 Write-Host "[build_gcc] Target     : $targets"
 Write-Host
 
-$makeArgs = @("CC=gcc", "PLATFORM=windows") + $buildVars + @($targets)
+$makeArgs = @("CC=gcc", "PLATFORM=windows") + $buildVars
+if ($port) { $makeArgs += "PORT=$port" }
+$makeArgs += $targetParts
 & $makeCmd $makeArgs
 $exitCode = $LASTEXITCODE
 

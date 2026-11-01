@@ -42,7 +42,7 @@ extern "C" {
 #define CLI_VERSION_MINOR 3
 
 /** @brief Revision / patch number. Incremented on bug-fix releases. */
-#define CLI_VERSION_REVISION 1
+#define CLI_VERSION_REVISION 2
 
 /**
  * @brief Packed version word: 0x00MMmmrr (major, minor, revision).
@@ -77,7 +77,7 @@ extern "C" {
 #define CLI_VERSION_XSTR(v) CLI_VERSION_STR(v)
 
 /**
- * @brief Human-readable version string, for example @c "f60cc56-dirty".
+ * @brief Human-readable version string, for example @c "abcef31-dirty".
  *
  * Built from the individual numeric components via the stringify helpers.
  */

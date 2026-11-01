@@ -28,11 +28,13 @@ openlibcli_lib = library(
     install : true,
 )
 
-# ── Install headers (preserving subdirs like 'config') ─────────────────────
-install_subdir('cli',
-    install_dir : 'include/OpenLibCLI',
-    strip_directory : true
-)
+# ── Public headers: include/OpenLibCLI/ (config/, utils/ as in the source tree) ──
+install_headers('cli/cli.h', 'cli/cli_env_detect.h', 'cli/cli_version.h',
+    subdir : 'OpenLibCLI')
+install_headers('cli/config/cli_config.h', 'cli/config/cli_embedded_config.h',
+    subdir : 'OpenLibCLI/config')
+install_headers('cli/utils/cli_args_parse.h',
+    subdir : 'OpenLibCLI/utils')
 
 openlibcli_dep = declare_dependency(
     include_directories : ['cli'],

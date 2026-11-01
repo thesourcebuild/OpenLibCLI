@@ -41,7 +41,7 @@ Download a `OpenLibCLI-<version>-src` package from Releases.
 
 Copy `cli/` into your project and include the source files in your build:
 
-- Add `cli/cli.c` to your compile targets.
+- Add `cli/cli.c` and `cli/utils/cli_args_parse.c` to your compile targets.
 - Add `cli/` to your include path.
 - Optionally pick `cli/config/cli_config.h` (desktop) or `cli/config/cli_embedded_config.h` for (AVR, ARM, RISC-V etc.) then copy and rename to `cli/config/cli_config.h`.
 
@@ -59,10 +59,10 @@ cmake -B build -DCMAKE_PREFIX_PATH=/path/to/OpenLibCLI-<version>-cmake
 cmake --build build
 ```
 
-Or set `openlibcli_DIR` to point at the package directly:
+Or set `OpenLibCLI_DIR` to point at the package directly:
 
 ```bash
-cmake -B build -Dopenlibcli_DIR=/path/to/OpenLibCLI-<version>-cmake/lib/cmake/OpenLibCLI
+cmake -B build -DOpenLibCLI_DIR=/path/to/OpenLibCLI-<version>-cmake/lib/cmake/OpenLibCLI
 cmake --build build
 ```
 

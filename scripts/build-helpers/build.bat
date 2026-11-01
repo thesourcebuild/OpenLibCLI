@@ -18,45 +18,28 @@ setlocal enabledelayedexpansion
 set "SCRIPT_DIR=%~dp0"
 
 :: --------------------------------------------------------------------------
-::  Parse: toolchain name (if first arg matches) + build REST from remaining
+::  Parse: an optional toolchain name as the first argument. Everything after it
+::  is passed on exactly as typed (REST), never rebuilt from %~1 ... %~9, which
+::  would drop quotes and split "-DVAR=VAL" at the '='.
 :: --------------------------------------------------------------------------
 set "TOOLCHAIN="
-set "REST="
+set "ARGS=%*"
+set "REST=!ARGS!"
+set "FIRST=%~1"
 
-:parse_args
-if "%~1"=="" goto :done_parse
+if /i "!FIRST!"=="help"   goto :show_help
+if /i "!FIRST!"=="--help" goto :show_help
+if /i "!FIRST!"=="-h"     goto :show_help
 
-if /i "%~1"=="help"     if "!TOOLCHAIN!"=="" goto :show_help
-if /i "%~1"=="--help"   if "!TOOLCHAIN!"=="" goto :show_help
-if /i "%~1"=="-h"       if "!TOOLCHAIN!"=="" goto :show_help
-
-:: First arg matching a known toolchain — store it, skip it
-if /i "%~1"=="msvc" (
-    if "!TOOLCHAIN!"=="" ( set "TOOLCHAIN=msvc" & shift & goto :parse_args )
+for %%T in (msvc gcc mingw cmake meson all) do (
+    if /i "!FIRST!"=="%%T" set "TOOLCHAIN=%%T"
 )
-if /i "%~1"=="gcc" (
-    if "!TOOLCHAIN!"=="" ( set "TOOLCHAIN=gcc" & shift & goto :parse_args )
+if defined TOOLCHAIN (
+    rem Drop the first word; the rest keeps its original text (quotes, '=').
+    set "REST="
+    for /f "tokens=1,*" %%A in ("!ARGS!") do set "REST=%%B"
 )
-if /i "%~1"=="mingw" (
-    if "!TOOLCHAIN!"=="" ( set "TOOLCHAIN=gcc" & shift & goto :parse_args )
-)
-if /i "%~1"=="cmake" (
-    if "!TOOLCHAIN!"=="" ( set "TOOLCHAIN=cmake" & shift & goto :parse_args )
-)
-if /i "%~1"=="meson" (
-    if "!TOOLCHAIN!"=="" ( set "TOOLCHAIN=meson" & shift & goto :parse_args )
-)
-if /i "%~1"=="all" (
-    if "!TOOLCHAIN!"=="" ( set "TOOLCHAIN=all" & shift & goto :parse_args )
-)
-
-:: Not a toolchain name (or already consumed one) — append to REST
-if "!REST!"=="" ( set "REST=%~1" ) else ( set "REST=!REST! %~1" )
-shift
-goto :parse_args
-
-:done_parse
-
+if /i "!TOOLCHAIN!"=="mingw" set "TOOLCHAIN=gcc"
 if "!TOOLCHAIN!"=="" set "TOOLCHAIN=auto"
 
 :: --------------------------------------------------------------------------

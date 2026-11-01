@@ -361,7 +361,7 @@ static void cli_foreach_match(cli_struct_t *cli, const char *prefix, cli_cmd_han
 static int8_t cli_resolve_one(cli_struct_t *cli, const char *word, cli_cmd_handle_t parent,
                               cli_cmd_handle_t *out);
 static bool cli_has_any_match(cli_struct_t *cli, const char *word, cli_cmd_handle_t parent);
-static bool cli_cmd_has_children(cli_struct_t *cli, cli_cmd_handle_t parent);
+static bool cli_cmd_has_children(const cli_struct_t *cli, cli_cmd_handle_t parent);
 static cli_cmd_handle_t cli_first_word_parent(cli_struct_t *cli, const char *word);
 static int8_t cli_walk_words(cli_struct_t *cli, const char *argv[], int count,
                              cli_cmd_handle_t *parent, bool *args);
@@ -424,6 +424,8 @@ static void cli_auth_backspace(cli_struct_t *cli);
 static void cli_auth_clear_input(cli_struct_t *cli);
 static void cli_auth_insert_char(cli_struct_t *cli, char c);
 static int8_t cli_auth_submit_line(cli_struct_t *cli);
+static int8_t cli_auth_run_callback(cli_struct_t *cli, cli_auth_fn fn);
+static void cli_auth_enable_result(cli_struct_t *cli, int8_t ok, int8_t *rc);
 static int8_t cli_auth_handle(cli_struct_t *cli, int byte);
 #endif
 static void cli_reset_input(cli_struct_t *cli);
@@ -1688,7 +1690,11 @@ OPENLIBCLI_API int8_t cli_set_mode(cli_struct_t *cli, cli_mode_t mode) {
     } else {
       rc = cli_nav_push(cli);
       if (rc == CLI_OK) {
+        /* A new mode starts at the root: the submenu's commands belong to the mode it was
+         * entered in. The saved level keeps the submenu, so 'exit' returns to it. A submenu
+         * command that switches mode is entered afterwards (cli_context_enter()). */
         cli->mode = mode;
+        cli->context = CLI_CMD_ROOT;
         cli_notify_mode_change(cli);
       }
     }
@@ -3417,16 +3423,24 @@ static void cli_foreach_match(cli_struct_t *cli, const char *word, cli_cmd_handl
  * @brief Test whether @p cmd is a live child of @p parent usable in the current
  *        privilege level and mode (hidden commands included).
  *
+ * A container without a handler counts only while one of its subcommands is usable:
+ * otherwise it could do nothing and would only reveal that the subcommands exist.
+ *
  * @param[in] cli     Active CLI session.
- * @param[in] cmd     Command node.
+ * @param[in] cmd     Command node (an element of @c cli->cmd_pool).
  * @param[in] parent  Expected parent handle.
  *
  * @return @c true if the command may be matched.
  */
 static bool cli_cmd_selectable(const cli_struct_t *cli, const cli_cmd_struct_t *cmd,
                                cli_cmd_handle_t parent) {
-  return (CLI_CMD_IS_IN_USE(cmd) && cmd->parent == parent && cmd->privilege <= cli->privilege &&
-          (cmd->mode == CLI_MODE_ANY || cmd->mode == cli->mode));
+  bool allowed = (CLI_CMD_IS_IN_USE(cmd) && cmd->parent == parent &&
+                  cmd->privilege <= cli->privilege &&
+                  (cmd->mode == CLI_MODE_ANY || cmd->mode == cli->mode));
+
+  /* Recursion follows the parent links downwards, so it ends at the tree's leaves. */
+  return allowed && (cmd->callback != NULL ||
+                     cli_cmd_has_children(cli, (cli_cmd_handle_t)(cmd - cli->cmd_pool)));
 }
 
 /**
@@ -3661,7 +3675,7 @@ static bool cli_has_any_match(cli_struct_t *cli, const char *word, cli_cmd_handl
  *
  * @return @c true when such a child exists, otherwise @c false.
  */
-static bool cli_cmd_has_children(cli_struct_t *cli, cli_cmd_handle_t parent) {
+static bool cli_cmd_has_children(const cli_struct_t *cli, cli_cmd_handle_t parent) {
   bool has_children = False;
 
   for (cli_poolsize_t i = 0; i < cli->cmd_pool_size && !has_children; i++) {
@@ -4447,10 +4461,12 @@ static int8_t cli_execute_command(cli_struct_t *cli, const char *argv[], cli_arg
           cli_session_state_enum_t state_before = cli->session_state;
           rc = cmd->callback(cli, cmd->name, rem_argc, &argv[depth]);
 
-          /* A bare submenu command (no arguments) enters that submenu. The session may have
-           * been restarted / stopped by the callback, in which case navigation is left alone. */
-          if (rc == CLI_OK && has_children && rem_argc == 1 &&
-              cli->session_state == state_before && cli_handle_valid(cli, h)) {
+          /* A bare submenu command (no arguments) enters that submenu. Its subcommands are
+           * looked up again now: the callback may have switched to the mode (or raised the
+           * privilege) they need. The session may have been restarted / stopped by the
+           * callback, in which case navigation is left alone. */
+          if (rc == CLI_OK && rem_argc == 1 && cli->session_state == state_before &&
+              cli_handle_valid(cli, h) && cli_cmd_has_children(cli, h)) {
             if (cli_context_enter(cli, h, depth_before) != CLI_OK) {
               CLI_WSTR(cli, "% Navigation depth limit reached.\r\n");
               rc = CLI_ERR_NOMEM;
@@ -4736,7 +4752,7 @@ static int8_t cli_auth_verify(cli_struct_t *cli) {
   cli_set_privilege(cli, CLI_PRIV_USER);
 
   if (cli->authorization_cb != NULL) {
-    ok = cli->authorization_cb(cli, cli->auth_username, cli->input);
+    ok = cli_auth_run_callback(cli, cli->authorization_cb);
   } else {
     /* Every entry is checked with constant-time comparisons and without stopping at a
      * match, so response time does not reveal which usernames exist or how much of a
@@ -4831,35 +4847,76 @@ static int8_t cli_auth_submit_line(cli_struct_t *cli) {
     int8_t ok;
 
     if (cli->enable_privilege_cb != NULL) {
-      ok = cli->enable_privilege_cb(cli, cli->auth_username, cli->input);
+      ok = cli_auth_run_callback(cli, cli->enable_privilege_cb);
     } else {
       ok = cli_secret_equal(cli->input, cli->enable_privilege_secret, CLI_MAX_ENABLE_SECRET_LEN)
                ? CLI_OK
                : CLI_ERR_AUTH;
     }
     cli_wipe_input(cli); /* do not leave the secret in memory */
-    cli->auth_state = cli->auth_resume_state;
 
-    if (ok == CLI_OK) {
-      cli->enable_attempts = 0;
-      /* Enter the mode before raising privilege so 'exit' returns to the unprivileged level. */
-      if (cli_set_mode(cli, CLI_MODE_ENABLE) == CLI_OK) {
-        cli_set_privilege(cli, CLI_PRIV_PRIVILEGED);
-      } else {
-        CLI_WSTR(cli, "% Navigation depth limit reached.\r\n");
-      }
+    if (cli->auth_state != CLI_AUTH_ENABLE_MODE_PASSWORD) {
+      /* The callback asked for something else instead (cli_request_auth(): a new login).
+       * That replaces this attempt; its prompt is shown now, after the callback. */
+      cli_redisplay_input(cli);
     } else {
-      CLI_WSTR(cli, "% Access denied.\r\n");
-      cli->enable_attempts++;
-      if (cli->enable_attempts >= CLI_AUTH_MAX_ATTEMPTS) {
-        rc = cli_auth_limit_reached(cli, cli->auth_resume_state);
-      }
+      cli->auth_state = cli->auth_resume_state;
+      cli_auth_enable_result(cli, ok, &rc);
     }
   } else {
     /* To silence MISRA */
   }
 
   return rc;
+}
+
+/**
+ * @brief Run a credential check callback (login or enable secret) like a command.
+ *
+ * Output it prints is finished properly, and a prompt change it causes
+ * (@c cli_request_auth()) is shown after it rather than in the middle. The typed secret
+ * occupies the editor's line, so a @c cli_exec() it makes is placed after it.
+ *
+ * @param[in] cli  Active CLI session.
+ * @param[in] fn   Callback; receives the username and the typed secret.
+ *
+ * @return The callback's result.
+ */
+static int8_t cli_auth_run_callback(cli_struct_t *cli, cli_auth_fn fn) {
+  bool outermost;
+  int8_t ok;
+
+  cli->exec_used = cli->input_len + 1;
+  outermost = cli_command_begin(cli);
+  ok = fn(cli, cli->auth_username, cli->input);
+  cli_command_end(cli, outermost);
+
+  return ok;
+}
+
+/**
+ * @brief Apply the result of an enable-secret check: privileged exec, or a failed attempt.
+ *
+ * @param[in]     cli  Active CLI session.
+ * @param[in]     ok   @c CLI_OK when the secret was accepted.
+ * @param[in,out] rc   Set to @c CLI_ERR_AUTH when the attempt limit closes the session.
+ */
+static void cli_auth_enable_result(cli_struct_t *cli, int8_t ok, int8_t *rc) {
+  if (ok == CLI_OK) {
+    cli->enable_attempts = 0;
+    /* Enter the mode before raising privilege so 'exit' returns to the unprivileged level. */
+    if (cli_set_mode(cli, CLI_MODE_ENABLE) == CLI_OK) {
+      cli_set_privilege(cli, CLI_PRIV_PRIVILEGED);
+    } else {
+      CLI_WSTR(cli, "% Navigation depth limit reached.\r\n");
+    }
+  } else {
+    CLI_WSTR(cli, "% Access denied.\r\n");
+    cli->enable_attempts++;
+    if (cli->enable_attempts >= CLI_AUTH_MAX_ATTEMPTS) {
+      *rc = cli_auth_limit_reached(cli, cli->auth_resume_state);
+    }
+  }
 }
 
 static int8_t cli_auth_handle(cli_struct_t *cli, int byte) {

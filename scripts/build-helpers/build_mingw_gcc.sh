@@ -62,6 +62,7 @@ die()  { echo -e "${RED}[build_mingw_gcc] ERROR:${RST} $*" >&2; exit 1; }
 if [ -z "${PLATFORM:-}" ]; then
     case "$(uname -s 2>/dev/null)" in
         Darwin)              PLATFORM="macos"   ;;
+        FreeBSD|NetBSD|OpenBSD|DragonFly) PLATFORM="bsd" ;;
         MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
         *)                   PLATFORM="linux"  ;;
     esac
@@ -131,6 +132,7 @@ outdir() {
     case "$PLATFORM" in
         windows) echo "build/gcc/windows" ;;
         macos)   echo "build/gcc/macos"   ;;
+        bsd)     echo "build/gcc/bsd"     ;;
         *)       echo "build/gcc/linux"   ;;
     esac
 }
