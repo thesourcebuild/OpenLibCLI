@@ -71,6 +71,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004 /* missing from older SDK headers */
+#endif
 #else
 #include <poll.h>
 #include <pthread.h>
@@ -318,21 +321,26 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
   cli_start(cli);
   int8_t rc;
   while (1) {
+    /* Wait up to a second for input (timers still run in between). Not before the banner
+     * and the first prompt, which are shown at once, and not once the pipe reports an error:
+     * the engine ends the session then. */
+    if (cli_get_session_state(cli) == CLI_SESSION_RUN) {
 #if ENV_IS_WINDOWS
-    DWORD start = GetTickCount();
-    while (cli->transport.available(cli->transport.ctx) <= 0) {
-      if (GetTickCount() - start >= 1000) {
-        break;
+      DWORD start = GetTickCount();
+      while (cli->transport.available(cli->transport.ctx) == 0) {
+        if (GetTickCount() - start >= 1000) {
+          break;
+        }
+        Sleep(1);
       }
-      Sleep(1);
-    }
 #else
-    struct pollfd pfd;
-    pfd.fd = ((cli_pipe_ctx_struct_t *)cli->transport.ctx)->read_fd;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
-    (void)poll(&pfd, 1, 1000);
+      struct pollfd pfd;
+      pfd.fd = ((cli_pipe_ctx_struct_t *)cli->transport.ctx)->read_fd;
+      pfd.events = POLLIN;
+      pfd.revents = 0;
+      (void)poll(&pfd, 1, 1000);
 #endif
+    }
     rc = cli_session_engine(cli);
     if (rc != CLI_OK) {
       cli->session_state = CLI_SESSION_STOP;
@@ -349,8 +357,8 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
  *
  * Loops indefinitely, accepting one client per iteration via
  * @c cli_named_pipe_listen() and ending each session with
- * @c cli_named_pipe_disconnect(), which waits until that client has gone so the
- * next listen cannot pick up its leftover pipe ends.
+ * @c cli_named_pipe_disconnect(). An idle client is disconnected after the idle
+ * timeout, so it cannot keep the next client out.
  *
  * @param[in] name  Logical pipe name / base path.
  *
@@ -394,6 +402,8 @@ static int run_named_server(const char *name) {
       cli_init(&demo_cli, "pipe-router", &transport, NULL, demo_cmd_pool, CLI_MAX_COMMANDS);
       register_commands(&demo_cli);
       setup_session(&demo_cli, session_num);
+      /* One client at a time: an idle connection is closed so the next client can get in. */
+      cli_set_idle_timeout_mode(&demo_cli, CLI_IDLE_TIMEOUT_POLICY_CLOSE);
       int8_t rc = cli_server_loop(&demo_cli);
       printf("Session %d ended (rc=%d)\n", session_num, rc);
 
@@ -428,6 +438,7 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
   HANDLE h_read = (HANDLE)ctx->h_read;
   HANDLE h_write = (HANDLE)ctx->h_write;
   HANDLE h_stdin = GetStdHandle(STD_INPUT_HANDLE);
+  HANDLE h_stdout = GetStdHandle(STD_OUTPUT_HANDLE);
 
   DWORD old_mode = 0;
   BOOL is_con = GetConsoleMode(h_stdin, &old_mode);
@@ -435,6 +446,12 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
     SetConsoleMode(h_stdin, (old_mode & ~(DWORD)(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) |
                                 ENABLE_PROCESSED_INPUT);
   }
+
+  /* The CLI redraws lines and clears the screen with VT100 sequences: have the console
+   * interpret them instead of printing them (Windows 10 and later). */
+  DWORD old_out_mode = 0;
+  BOOL out_vt = GetConsoleMode(h_stdout, &old_out_mode) &&
+                SetConsoleMode(h_stdout, old_out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 
   uint8_t pipe_buf[512];
   int32_t running = 1;
@@ -528,8 +545,9 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
         }
       }
     } else if (!input_open) {
-      /* Input exhausted: keep showing the server's replies until it closes the session
-       * (like the POSIX client, whose reader thread keeps draining). */
+      /* Input exhausted: keep showing the server's replies until it closes the session. A
+       * duplex pipe cannot be half-closed to announce the end of input, so that happens on
+       * 'exit' / 'quit' in the input or when the server's idle timeout closes the session. */
       cli_sleep_ms(10U);
     } else {
       char filter_line_buf[512];
@@ -546,6 +564,9 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
 
   if (is_con) {
     SetConsoleMode(h_stdin, old_mode);
+  }
+  if (out_vt) {
+    SetConsoleMode(h_stdout, old_out_mode);
   }
 }
 
@@ -582,8 +603,10 @@ static void pipe_raw_mode(void) {
     if (tcgetattr(STDIN_FILENO, &s_pipe_orig_term) == 0) {
       term = s_pipe_orig_term;
       /* ISIG off: Ctrl-C / Ctrl-Z go to the CLI instead of killing this client with the
-       * terminal still in no-echo mode. */
-      term.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE | ISIG);
+       * terminal still in no-echo mode. IXON / IEXTEN off: Ctrl-S, Ctrl-Q, Ctrl-V and Ctrl-O
+       * are passed through instead of being handled by the terminal. */
+      term.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE | ISIG | IEXTEN);
+      term.c_iflag &= (tcflag_t) ~(IXON);
       term.c_cc[VMIN] = 1;
       term.c_cc[VTIME] = 0;
       if (tcsetattr(STDIN_FILENO, TCSANOW, &term) == 0) {
@@ -631,10 +654,17 @@ static PFT_THREAD_FN relay_writer_fn(PFT_THREAD_ARG arg) {
   uint8_t byte;
   while (!r->done) {
     ssize_t n = read(STDIN_FILENO, &byte, 1);
-    if (n <= 0)
+    if (n == 0) {
+      /* End of input (e.g. piped commands): closing our write end tells the server, which
+       * ends the session after the commands sent so far; the reader keeps printing the
+       * replies until then. Only this thread uses write_fd. */
+      close(r->ctx->write_fd);
+      r->ctx->write_fd = -1;
       break;
-    if (cli_pipe_write(r->ctx, (const char *)&byte, 1) < 0)
+    }
+    if (n < 0 || cli_pipe_write(r->ctx, (const char *)&byte, 1) < 0) {
       break;
+    }
   }
   return PFT_THREAD_RET;
 }

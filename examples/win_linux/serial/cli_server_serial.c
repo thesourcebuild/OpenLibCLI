@@ -75,6 +75,10 @@ static cli_transport_struct_t s_transport; /**< Serial transport vtable. */
 static struct termios s_orig_term; /**< Saved terminal attributes for restore. */
 static int32_t s_raw_mode = 0;     /**< Non-zero while raw mode is active. */
 #endif
+#if ENV_IS_WINDOWS
+static DWORD s_orig_out_mode; /**< Console output mode saved by platform_enable_vt(). */
+static BOOL s_vt_enabled;     /**< TRUE while VT processing was switched on by us. */
+#endif
 
 /*=======================================================================================
  * Private Function Prototypes
@@ -86,6 +90,10 @@ static uint32_t platform_micros(void *ctx);
 #if ENV_IS_UNIX_LIKE
 static void platform_raw_mode(void);
 static void platform_restore_term(void);
+#endif
+#if ENV_IS_WINDOWS
+static bool platform_enable_vt(void);
+static void platform_restore_vt(void);
 #endif
 static int8_t cli_server_loop(cli_struct_t *cli);
 
@@ -127,6 +135,15 @@ int main(void) {
   // cli_set_quit_policy(&demo_cli, CLI_QUIT_POLICY_RESET_SESSION);
   // cli_set_auth_failure_mode(&demo_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
 
+#if ENV_IS_WINDOWS
+  /* The CLI redraws lines and clears the screen with VT100 sequences: have the console
+   * interpret them, or use plain output where it cannot (set before the built-in commands
+   * are registered, which add 'clear' only for ANSI terminals). */
+  if (!platform_enable_vt()) {
+    cli_set_ansi_supported(&demo_cli, false);
+  }
+#endif
+
   demo_register_commands(&demo_cli);
   demo_setup_session(&demo_cli, &s_app, 1, 4321, 3800, CLI_DEMO_BANNER_SERIAL);
 
@@ -139,6 +156,9 @@ int main(void) {
 
 #if ENV_IS_UNIX_LIKE
   platform_restore_term();
+#endif
+#if ENV_IS_WINDOWS
+  platform_restore_vt();
 #endif
 
   cli_done(&demo_cli);
@@ -163,21 +183,24 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
   cli_start(cli);
   int8_t rc;
   while (1) {
+    /* The banner and the first prompt are shown at once; afterwards wait for a key. */
+    if (cli_get_session_state(cli) == CLI_SESSION_RUN) {
 #if ENV_IS_WINDOWS
-    DWORD start = GetTickCount();
-    while (!_kbhit()) {
-      if (GetTickCount() - start >= 1000) {
-        break;
+      DWORD start = GetTickCount();
+      while (!_kbhit()) {
+        if (GetTickCount() - start >= 1000) {
+          break;
+        }
+        Sleep(1);
       }
-      Sleep(1);
-    }
 #else
-    struct pollfd pfd;
-    pfd.fd = STDIN_FILENO;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
-    (void)poll(&pfd, 1, 1000);
+      struct pollfd pfd;
+      pfd.fd = STDIN_FILENO;
+      pfd.events = POLLIN;
+      pfd.revents = 0;
+      (void)poll(&pfd, 1, 1000);
 #endif
+    }
     rc = cli_session_engine(cli);
     if (rc != CLI_OK) {
       cli->session_state = CLI_SESSION_STOP;
@@ -231,7 +254,10 @@ static void platform_raw_mode(void) {
     struct termios term;
     tcgetattr(STDIN_FILENO, &s_orig_term);
     term = s_orig_term;
-    term.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE | ISIG);
+    /* IXON / IEXTEN off as well: Ctrl-S would otherwise stop all output (and the next large
+     * write would block this single-threaded server), Ctrl-V / Ctrl-O would be swallowed. */
+    term.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE | ISIG | IEXTEN);
+    term.c_iflag &= (tcflag_t) ~(IXON);
     term.c_cc[VMIN] = 0;
     term.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSANOW, &term);
@@ -247,6 +273,36 @@ static void platform_restore_term(void) {
     tcsetattr(STDIN_FILENO, TCSANOW, &s_orig_term);
   }
   s_raw_mode = 0;
+}
+#endif
+
+#if ENV_IS_WINDOWS
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004 /* missing from older SDK headers */
+#endif
+
+/**
+ * @brief Let the console interpret VT100 escape sequences written to stdout.
+ *
+ * @return @c true if stdout is a console that now processes them (Windows 10 and
+ *         later), @c false otherwise.
+ */
+static bool platform_enable_vt(void) {
+  HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+
+  s_vt_enabled = GetConsoleMode(out, &s_orig_out_mode) &&
+                 SetConsoleMode(out, s_orig_out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+  return (s_vt_enabled != FALSE);
+}
+
+/**
+ * @brief Restore the console output mode saved by @c platform_enable_vt().
+ */
+static void platform_restore_vt(void) {
+  if (s_vt_enabled) {
+    (void)SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), s_orig_out_mode);
+    s_vt_enabled = FALSE;
+  }
 }
 #endif
 

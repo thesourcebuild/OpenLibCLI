@@ -147,6 +147,8 @@ int main(int argc, char *argv[]) {
 
         demo_register_commands(&demo_cli);
         demo_setup_session(&demo_cli, &s_app, session_num, 12345, 11000, CLI_DEMO_BANNER_TELNET);
+        /* One client at a time: an idle connection is closed so the next client can get in. */
+        cli_set_idle_timeout_mode(&demo_cli, CLI_IDLE_TIMEOUT_POLICY_CLOSE);
 
         int8_t rc = cli_server_loop(&demo_cli);
 

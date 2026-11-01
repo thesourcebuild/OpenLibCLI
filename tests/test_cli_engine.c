@@ -1470,6 +1470,107 @@ static void test_idle_untouched_session_not_reset(void) {
   TEST_END();
 }
 
+/* Round 4 regressions ------------------------------------------------------------------*/
+
+static void test_overlong_credentials_rejected(void) {
+  char user[CLI_MAX_USERNAME_LEN];
+  char pass[CLI_MAX_PASSWORD_LEN];
+  char line[CLI_MAX_USERNAME_LEN + CLI_MAX_PASSWORD_LEN + 8];
+
+  TEST_START("overlong_credentials_rejected");
+  /* Longest valid username / password: typing one more character must not be cut back to a
+   * matching value. */
+  memset(user, 'u', sizeof(user) - 1U);
+  user[sizeof(user) - 1U] = '\0';
+  memset(pass, 'p', sizeof(pass) - 1U);
+  pass[sizeof(pass) - 1U] = '\0';
+
+  session_new();
+  ASSERT_EQ(cli_add_user(&s_cli, user, pass, CLI_PRIV_USER), CLI_OK);
+  cli_require_authorization(&s_cli, true);
+  session_start();
+  (void)snprintf(line, sizeof(line), "%s\r%sX\r", user, pass);
+  type(line);
+  ASSERT_OUT("Authentication failed");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  (void)snprintf(line, sizeof(line), "%sX\r%s\r", user, pass);
+  type(line);
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  (void)snprintf(line, sizeof(line), "%s\r%s\r", user, pass);
+  type(line);
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_AUTHENTICATED);
+
+  /* Enable secret of the maximum length, typed with an extra character. */
+  memset(pass, 's', sizeof(pass) - 1U);
+  session_new();
+  ASSERT_EQ(cli_set_enable_secret(&s_cli, pass), CLI_OK);
+  session_start();
+  (void)snprintf(line, sizeof(line), "enable\r%sX\r", pass);
+  type(line);
+  ASSERT_OUT("Access denied");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  TEST_END();
+}
+
+static void test_lockout_survives_idle_timeout(void) {
+  TEST_START("lockout_survives_idle_timeout");
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_auth_failure_mode(&s_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
+  cli_set_auth_lockout_duration(&s_cli, 30U);
+  cli_set_idle_timeout(&s_cli, 10U);
+  session_start();
+
+  type("x\rx\rx\rx\rx\rx\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  s_now += 11U; /* idle period over, lockout not */
+  out_clear();
+  (void)run();
+  ASSERT_NOT_OUT("Idle timeout");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+
+  s_now += 20U; /* lockout over: login prompt, and a fresh idle period */
+  (void)run();
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  ASSERT_NOT_OUT("Idle timeout");
+  type("admin\rpw\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_AUTHENTICATED);
+  TEST_END();
+}
+
+static void test_empty_word_is_no_command(void) {
+  TEST_START("empty_word_is_no_command");
+  session_new();
+  session_start();
+
+  /* "show" has a single subcommand: an empty word must not select it. */
+  type("show \"\"\r");
+  ASSERT_EQ(s_cb_count, 0);
+  ASSERT_OUT("Unknown command");
+  out_clear();
+  type("help show \"\"\r");
+  ASSERT_OUT("Unknown command");
+  TEST_END();
+}
+
+static void test_relogin_not_in_new_history(void) {
+  TEST_START("relogin_not_in_new_history");
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_quit_policy(&s_cli, CLI_QUIT_POLICY_RESET_SESSION);
+  session_start();
+
+  type("admin\rpw\rshow version\rrelogin\radmin\rpw\r");
+  ASSERT_EQ(s_cli.history_count, 0);
+  type("show version\rquit\r");
+  (void)run();
+  type("admin\rpw\r");
+  ASSERT_EQ(s_cli.history_count, 0);
+  TEST_END();
+}
+
 static void test_null_safety(void) {
   TEST_START("null_safety");
   session_new();
@@ -1563,6 +1664,10 @@ int main(void) {
   RUN_SUITE(test_no_commands_after_write_error);
   RUN_SUITE(test_auth_prompt_keeps_running_args);
   RUN_SUITE(test_idle_untouched_session_not_reset);
+  RUN_SUITE(test_overlong_credentials_rejected);
+  RUN_SUITE(test_lockout_survives_idle_timeout);
+  RUN_SUITE(test_empty_word_is_no_command);
+  RUN_SUITE(test_relogin_not_in_new_history);
 
   printf("\n--- robustness ---\n");
   RUN_SUITE(test_write_error_ends_session);

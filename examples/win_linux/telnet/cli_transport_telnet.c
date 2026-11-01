@@ -59,6 +59,12 @@
 #define TELNET_SB 250U
 /** @brief End sub-negotiation block. */
 #define TELNET_SE 240U
+/** @brief Erase Line command. */
+#define TELNET_EL 248U
+/** @brief Erase Character command. */
+#define TELNET_EC 247U
+/** @brief Are You There command. */
+#define TELNET_AYT 246U
 
 /** @brief Echo option. */
 #define TELNET_OPT_ECHO 1U
@@ -580,6 +586,21 @@ static bool cli_telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, 
       ctx->state = TELNET_STATE_SB;
       ctx->sb_len = 0U;
     } else {
+      /* Editing commands become the line editor's keys (Backspace, Ctrl-U); "are you there"
+       * is answered with a bell, which leaves the line being edited intact. Others (NOP, GA,
+       * IP, AO, BRK, DM) mean nothing to a line editor. */
+      if (byte == TELNET_EC) {
+        *out = 0x08U;
+        stored = true;
+      } else if (byte == TELNET_EL) {
+        *out = 0x15U;
+        stored = true;
+      } else if (byte == TELNET_AYT) {
+        static const uint8_t bell = 0x07U;
+        (void)cli_telnet_send_all((cli_sock_t)ctx->fd, &bell, 1);
+      } else {
+        /* Ignored. */
+      }
       ctx->state = TELNET_STATE_NORMAL;
     }
     break;

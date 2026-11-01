@@ -123,6 +123,9 @@ typedef struct {
  * or a socket another server is still accepting on, is left untouched and the
  * call fails (@c errno = @c ENOTSOCK / @c EADDRINUSE).
  *
+ * The socket file is made owner-only (0600) before it accepts connections, so
+ * only the user running the server can connect.
+ *
  * @param[in] path  Filesystem path for the socket.
  *
  * @return Listening socket fd (>= 0) on success, @c -1 on error.
@@ -150,6 +153,19 @@ int32_t cli_unix_accept(int32_t listen_fd);
  * @return Connected socket fd (>= 0) on success, @c -1 on error.
  */
 int32_t cli_unix_connect(const char *path);
+
+/**
+ * @brief Check that the process at the other end of @p fd runs as this user.
+ *
+ * A client should call this before sending credentials: in a shared directory
+ * such as @c /tmp another user may have created a socket at the expected path.
+ * Uses @c SO_PEERCRED (Linux) or @c getpeereid() (BSD, macOS).
+ *
+ * @param[in] fd  Connected socket fd.
+ *
+ * @return @c true if the peer's effective user id equals ours.
+ */
+bool cli_unix_peer_is_self(int32_t fd);
 
 /**
  * @brief Bind a connected fd to a @c cli_transport_struct_t vtable.

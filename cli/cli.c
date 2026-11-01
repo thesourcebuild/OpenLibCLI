@@ -69,6 +69,12 @@
 #error "CLI_MAX_EXEC_DEPTH must be in the range 1..255"
 #endif
 
+#if CLI_ENABLE_AUTH && ((CLI_MAX_USERNAME_LEN >= CLI_MAX_INPUT_LEN) ||                           \
+                        (CLI_MAX_PASSWORD_LEN >= CLI_MAX_INPUT_LEN) ||                           \
+                        (CLI_MAX_ENABLE_SECRET_LEN >= CLI_MAX_INPUT_LEN))
+#error "CLI_MAX_USERNAME_LEN, CLI_MAX_PASSWORD_LEN and CLI_MAX_ENABLE_SECRET_LEN must be smaller than CLI_MAX_INPUT_LEN"
+#endif
+
 #if CLI_MAX_RX_BYTES_PER_TICK < 1
 #error "CLI_MAX_RX_BYTES_PER_TICK must be at least 1"
 #endif
@@ -1346,6 +1352,9 @@ OPENLIBCLI_API int8_t cli_clear_history(cli_struct_t *cli) {
 #if CLI_HISTORY_RESTORE_PREBROWSE_LINE
     cli->history_saved[0] = '\0';
 #endif
+#if CLI_HISTORY_INDEX_SELECTION
+    cli->history_cleared = True;
+#endif
 
     rc = CLI_OK;
   }
@@ -1367,6 +1376,11 @@ OPENLIBCLI_API int8_t cli_check_idle_timeout(cli_struct_t *cli) {
         (cli->idle_timeout_cb != NULL ||
          cli->idle_timeout_policy == CLI_IDLE_TIMEOUT_POLICY_CLOSE ||
          (cli->idle_timeout_policy == CLI_IDLE_TIMEOUT_POLICY_RESET_SESSION && cli->idle_armed));
+#if CLI_ENABLE_AUTH
+    /* A lockout accepts no input and ends by itself; restarting the session would end it
+     * early. The idle period starts again when the lockout is over. */
+    check_timeout = check_timeout && (cli->auth_state != CLI_AUTH_LOCKOUT);
+#endif
 
     if (check_timeout) {
       uint32_t now = cli->time_source(cli->time_source_ctx);
@@ -2124,10 +2138,12 @@ static void cli_text_copy(char *dst, const char *src, size_t size, bool progmem)
  *
  * Always inspects @p max_len bytes positions, so the comparison time reveals
  * neither the length of a matching prefix nor the stored secret's length.
+ * Characters after a terminating NUL are never read.
  *
- * @param[in] a        First NUL-terminated string (shorter than @p max_len).
- * @param[in] b        Second NUL-terminated string (shorter than @p max_len).
- * @param[in] max_len  Size of the buffers the strings live in.
+ * @param[in] a        First NUL-terminated string.
+ * @param[in] b        Second NUL-terminated string.
+ * @param[in] max_len  Positions compared. At least one of the strings must be shorter, so
+ *                     a longer other string differs at that string's terminator.
  *
  * @return @c true when both strings are identical.
  */
@@ -3450,8 +3466,10 @@ static int8_t cli_resolve_one(cli_struct_t *cli, const char *word, cli_cmd_handl
   cli_cmd_handle_t first = CLI_CMD_INVALID;
   cli_cmd_handle_t exact = CLI_CMD_INVALID;
   cli_len_t count = 0;
+  /* An empty word (a quoted "") names no command: as a prefix it would match them all. */
+  cli_poolsize_t scan = (word[0] != '\0') ? cli->cmd_pool_size : 0;
 
-  for (cli_poolsize_t i = 0; i < cli->cmd_pool_size; i++) {
+  for (cli_poolsize_t i = 0; i < scan; i++) {
     const cli_cmd_struct_t *cmd = &cli->cmd_pool[i];
     if (!cli_cmd_selectable(cli, cmd, parent)) {
       continue;
@@ -4341,6 +4359,7 @@ static int8_t cli_execute(cli_struct_t *cli, char *line, bool interactive) {
     char history_line[CLI_MAX_INPUT_LEN];
     if (interactive) {
       (void)cli_strlcpy(history_line, start, CLI_MAX_INPUT_LEN);
+      cli->history_cleared = False;
     }
 #else
     if (interactive) {
@@ -4384,7 +4403,9 @@ static int8_t cli_execute(cli_struct_t *cli, char *line, bool interactive) {
 
 #if CLI_ENABLE_HISTORY
 #if CLI_HISTORY_INDEX_SELECTION
-    if (interactive && rc != CLI_EXEC_REPLAY_INPUT) {
+    /* Recorded after it ran (so 'history N' counts the entries before it), unless the
+     * command cleared the history: the next login must not see it. */
+    if (interactive && rc != CLI_EXEC_REPLAY_INPUT && !cli->history_cleared) {
       cli_history_add(cli, history_line);
     }
 #endif
@@ -4462,6 +4483,7 @@ static bool cli_auth_lockout_expired(const cli_struct_t *cli) {
 static void cli_auth_lockout_end(cli_struct_t *cli) {
   cli->auth_lockout_started_ts = 0UL;
   cli_auth_reset_work(cli);
+  cli_idle_period_restart(cli); /* the idle timer was paused during the lockout */
 
   if (cli->auth_resume_state == CLI_AUTH_USERNAME) {
     cli->auth_attempts = 0;
@@ -4581,8 +4603,18 @@ static bool cli_auth_secret_input(const cli_struct_t *cli) {
          (cli->auth_state == CLI_AUTH_PASSWORD || cli->auth_state == CLI_AUTH_ENABLE_MODE_PASSWORD);
 }
 
+/**
+ * @brief Number of characters the current credential prompt accepts.
+ *
+ * One more than the longest valid entry: an entry typed too long keeps its extra
+ * character and therefore never matches, instead of being cut down to a valid one.
+ *
+ * @param[in] cli  Active CLI session.
+ *
+ * @return Maximum input length (below @c CLI_MAX_INPUT_LEN, see the config check).
+ */
 static cli_len_t cli_auth_input_limit(const cli_struct_t *cli) {
-  cli_len_t limit = CLI_MAX_INPUT_LEN;
+  cli_len_t limit = CLI_MAX_INPUT_LEN - 1;
 
   if (cli != NULL) {
     if (cli->auth_state == CLI_AUTH_USERNAME) {
@@ -4603,7 +4635,7 @@ static int8_t cli_auth_submit_line(cli_struct_t *cli) {
   int8_t rc = CLI_OK;
 
   if (cli->auth_state == CLI_AUTH_USERNAME) {
-    (void)cli_strlcpy(cli->auth_username, cli->input, CLI_MAX_USERNAME_LEN);
+    (void)cli_strlcpy(cli->auth_username, cli->input, sizeof(cli->auth_username));
     cli_reset_input(cli);
     cli->auth_state = CLI_AUTH_PASSWORD;
     CLI_WSTR(cli, "Password: ");
@@ -5035,7 +5067,7 @@ static void cli_auth_clear_input(cli_struct_t *cli) {
 
 static void cli_auth_insert_char(cli_struct_t *cli, char c) {
   if (cli != NULL) {
-    if (cli->input_len < cli_auth_input_limit(cli) - 1) {
+    if (cli->input_len < cli_auth_input_limit(cli)) {
       cli->input[cli->input_len++] = c;
       cli->input[cli->input_len] = '\0';
       cli->cursor = cli->input_len;

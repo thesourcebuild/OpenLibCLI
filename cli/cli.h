@@ -751,7 +751,9 @@ struct cli_s {
   cli_auth_state_enum_t auth_state;
   char users[CLI_MAX_USERS][CLI_MAX_USERNAME_LEN];     /**< Local user table usernames. */
   char passwords[CLI_MAX_USERS][CLI_MAX_PASSWORD_LEN]; /**< Local user table passwords. */
-  char auth_username[CLI_MAX_USERNAME_LEN];  /**< Username captured before password entry. */
+  char auth_username[CLI_MAX_USERNAME_LEN + 1]; /**< Username captured before password entry;
+                                                     one byte longer than a valid username, so
+                                                     a name typed too long never matches. */
   cli_priv_t user_privileges[CLI_MAX_USERS]; /**< Privilege level per local user. */
   cli_len_t num_users;     /**< Number of entries currently in the local user table. */
   cli_len_t auth_attempts;   /**< Number of failed login attempts in this auth cycle. */
@@ -842,6 +844,9 @@ struct cli_s {
   bool out_open;       /**< Command output so far did not end with a newline. */
 #if CLI_ENABLE_HISTORY && CLI_HISTORY_INDEX_SELECTION
   cli_history_idx_t history_replay; /**< Ring slot recalled by @c history N, or -1. */
+  bool history_cleared; /**< Set by @c cli_clear_history(): the typed line being executed
+                             is not recorded afterwards (it cleared the history, e.g. by
+                             starting a new login). */
 #endif
 
   /* --- ANSI / VT100 escape state machine
@@ -1234,6 +1239,9 @@ OPENLIBCLI_API int8_t cli_clear_history(cli_struct_t *cli);
  * @brief Check the idle timeout once; call periodically in non-blocking
  * integrations.
  *
+ * Nothing happens during an authentication lockout: it ends by itself, and the
+ * idle period starts again then.
+ *
  * @param[in] cli  Active CLI session.
  *
  * @return @c CLI_OK if the session is still active, negative if the timeout
@@ -1294,7 +1302,9 @@ OPENLIBCLI_API void cli_require_authorization(cli_struct_t *cli, bool require);
  * Applies after three failed logins and after three consecutive failed enable
  * secrets. @c CLI_AUTH_FAILURE_MODE_LOCKOUT needs a time source; without one
  * (and with a non-zero lockout duration) the session is closed instead, because
- * the lockout could never expire. Input received during a lockout is discarded.
+ * the lockout could never expire. Input received during a lockout is discarded,
+ * and the idle timeout is paused until the lockout ends (an idle session restart
+ * would otherwise end the lockout early).
  *
  * @param[in] cli   Active CLI session.
  * @param[in] mode  One of the @c cli_auth_failure_mode_enum_t values.

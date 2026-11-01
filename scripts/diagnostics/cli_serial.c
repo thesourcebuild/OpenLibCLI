@@ -94,7 +94,13 @@ void cli_serial_setup(const cli_transport_struct_t *transport,
 }
 
 void cli_serial_poll(void) {
-  if (cli_session_engine(&s_cli) != CLI_OK) {
+  int8_t rc = cli_session_engine(&s_cli);
+
+  if (rc == CLI_ERR_QUIT || rc == CLI_ERR_AUTH) {
+    /* A UART cannot reconnect: a closed session (failed logins, idle close) starts over at
+     * the banner instead of leaving the console dead until the next reset. */
+    cli_start(&s_cli);
+  } else if (rc != CLI_OK) {
     cli_serial_app_shutdown();
   }
 }

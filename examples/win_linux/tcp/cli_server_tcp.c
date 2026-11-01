@@ -176,6 +176,8 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
  */
 static void configure_session(cli_struct_t *cli, uint32_t session_num) {
   demo_setup_session(cli, &s_app, session_num, 12345, 11000, CLI_DEMO_BANNER_TCP);
+  /* One client at a time: an idle connection is closed so the next client can get in. */
+  cli_set_idle_timeout_mode(cli, CLI_IDLE_TIMEOUT_POLICY_CLOSE);
 }
 
 /*################################### END OF FILE ######################################*/

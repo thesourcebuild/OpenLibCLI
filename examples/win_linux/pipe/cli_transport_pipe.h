@@ -7,9 +7,14 @@
  *
  * **Named pipes**
  * - Windows: a single duplex HANDLE (path: @c \\\\.\pipe\<name>)
- * - POSIX: two FIFOs created on disk:
+ * - POSIX: two FIFOs created on disk (owner-only, mode 0600):
  *   - @c <name>.in bytes flowing into the CLI (CLI reads)
  *   - @c <name>.out bytes flowing out of the CLI (CLI writes)
+ *
+ * One client at a time: while a session runs, further clients wait (Windows: no
+ * free pipe instance; POSIX: the FIFO names are removed until the next listen).
+ * On POSIX two clients that open the FIFOs in the very same instant can both get
+ * in; only the owning user can open them at all.
  *
  * **Anonymous pipes**
  *
@@ -40,7 +45,7 @@
  *   }
  *
  *   cli_done(&cli);
- *   cli_named_pipe_disconnect(&pipe_ctx);  // waits for the client to leave
+ *   cli_named_pipe_disconnect(&pipe_ctx);
  * @endcode
  *
  * **Quick-start - named pipe client**
@@ -68,6 +73,10 @@
  * @note On POSIX, writing to a pipe whose read end has been closed delivers
  *       SIGPIPE. Applications should ignore SIGPIPE or install a handler
  *       before using this transport.
+ *
+ * @note On the server end of a named pipe a write that makes no progress for
+ *       @c CLI_PIPE_SEND_TIMEOUT_MS (the client stopped reading) fails, which
+ *       ends the session, instead of blocking the server.
  *
  * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
  *
@@ -105,9 +114,14 @@ extern "C" {
 #define CLI_PIPE_ERR (-1)
 
 #ifndef CLI_PIPE_CONNECT_TIMEOUT_MS
-/** @brief Windows: how long @c cli_named_pipe_connect() waits for the server to accept
- *         (it may be serving another client, or re-creating the pipe between sessions). */
+/** @brief How long @c cli_named_pipe_connect() waits for the server to accept (it may be
+ *         serving another client, or re-creating the pipe between sessions). */
 #define CLI_PIPE_CONNECT_TIMEOUT_MS 10000U
+#endif
+
+#ifndef CLI_PIPE_SEND_TIMEOUT_MS
+/** @brief Server end of a named pipe: a write blocked for this long ends the session. */
+#define CLI_PIPE_SEND_TIMEOUT_MS 5000U
 #endif
 
 /*=======================================================================================
@@ -123,13 +137,15 @@ extern "C" {
 /**
  * @brief Opaque pipe transport context.
  *
- * Zero-initialise before use (@c cli_pipe_ctx_struct_t ctx = {0};), then pass to
- * one of the open or create functions below. Treat every field as internal.
+ * Pass to one of the open or create functions below, which set every field, to
+ * the closed values when they fail, so @c cli_pipe_close() is always safe
+ * afterwards. Treat every field as internal.
  */
 typedef struct {
 #if ENV_IS_WINDOWS
   void *h_read;  /**< Windows HANDLE read end (@c NULL = closed). */
   void *h_write; /**< Windows HANDLE write end (@c NULL = closed). */
+  void *h_event; /**< Event for overlapped I/O on a server pipe (@c NULL otherwise). */
 #else
   int32_t read_fd;  /**< POSIX read file descriptor (@c -1 = closed). */
   int32_t write_fd; /**< POSIX write file descriptor (@c -1 = closed). */
@@ -149,10 +165,13 @@ typedef struct {
 /**
  * @brief Create a named pipe and block until one client connects.
  *
- * - Windows: creates @c \\\\.\pipe\<name> and waits in
+ * - Windows: creates an instance of @c \\\\.\pipe\<name> and waits in
  *   @c ConnectNamedPipe().
- * - POSIX: creates @c <name>.in and @c <name>.out FIFOs and opens them in a
- *   deadlock-safe order.
+ * - POSIX: creates new owner-only @c <name>.in and @c <name>.out FIFOs (a FIFO
+ *   left behind by a server that is gone is replaced; one another server is
+ *   listening on fails with @c EADDRINUSE) and waits for a client. Once the
+ *   client has both open, the names are removed again, so nobody else can join
+ *   the session.
  *
  * @param[in]  name  Logical name or base path.
  * @param[out] ctx   Caller-allocated context that must outlive the session.
@@ -164,10 +183,9 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx);
 /**
  * @brief Connect to a server blocked in @c cli_named_pipe_listen().
  *
- * - Windows: the server has a single pipe instance. While it is busy (serving
- *   another client) or between sessions (pipe not yet re-created), the call keeps
- *   waiting, up to @c CLI_PIPE_CONNECT_TIMEOUT_MS in total.
- * - POSIX: blocks in @c open() until the server has opened its FIFO ends.
+ * While the server is busy (serving another client) or between sessions (pipe
+ * not yet re-created), the call keeps waiting, up to @c CLI_PIPE_CONNECT_TIMEOUT_MS
+ * in total. On POSIX it opens @c <name>.in before @c <name>.out.
  *
  * @param[in]  name  Logical name or base path.
  * @param[out] ctx   Caller-allocated context that must outlive the session.
@@ -214,12 +232,10 @@ void cli_pipe_close(cli_pipe_ctx_struct_t *ctx);
 /**
  * @brief End a server session obtained from @c cli_named_pipe_listen().
  *
- * Unlike @c cli_pipe_close(), waits for the client to finish:
- * - Windows: flushes buffered output to the client, then disconnects the pipe.
- * - POSIX: closes @c <name>.out (the client reads the rest, then sees EOF) and
- *   waits until the client has closed @c <name>.in. Without this the next
- *   @c cli_named_pipe_listen() would open @c <name>.out against the previous
- *   client's still-open reader and start a session nobody is attached to.
+ * Closes the server end without blocking. Output already written stays readable:
+ * the client receives it and then sees the end of the connection. The client
+ * cannot reach the next session's pipe (Windows: a new instance; POSIX: new
+ * FIFOs), so nothing it still holds can be taken for the next client.
  *
  * @param[in] ctx  Server-side pipe context.
  */

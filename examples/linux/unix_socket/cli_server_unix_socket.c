@@ -13,11 +13,12 @@
  *
  * Terminal 2 — client:
  * cd /path/to/OpenLibCLI
- * ./build/gcc/linux/binaries/cli_server_unix_socket client /tmp/OpenLibCLI.sock
+ * ./build/gcc/linux/binaries/cli_server_unix_socket client
  *
- * Or connect with socat or nc:
- * socat - UNIX-CONNECT:/tmp/OpenLibCLI.sock
- * nc -U /tmp/OpenLibCLI.sock
+ * The socket is $XDG_RUNTIME_DIR/OpenLibCLI.sock (a per-user directory), or
+ * /tmp/OpenLibCLI.sock when that variable is not set. Or connect with socat or nc:
+ * socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/OpenLibCLI.sock
+ * nc -U $XDG_RUNTIME_DIR/OpenLibCLI.sock
  *
  * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
  *
@@ -45,6 +46,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -98,6 +100,8 @@ static volatile sig_atomic_t s_stop; /**< Set by SIGINT / SIGTERM to shut the se
 /** Self-pipe: the stop handler writes a byte so a waiting poll() wakes up at once, however
  *  the signal races with the wait (a flag checked before a blocking call can be missed). */
 static int s_stop_pipe[2] = {-1, -1};
+/** Default socket path in the per-user runtime directory (see default_socket_path()). */
+static char s_default_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 #endif
 
 /*=======================================================================================
@@ -120,6 +124,7 @@ static int8_t cli_server_loop(cli_struct_t *cli);
 static void on_stop_signal(int sig);
 static bool stop_signals_install(void);
 static int wait_readable_or_stop(int32_t fd, int timeout_ms);
+static const char *default_socket_path(void);
 #endif
 
 /*=======================================================================================
@@ -136,7 +141,7 @@ int main(void) {
 int main(int argc, char *argv[]) {
   int rc = 0;
   const char *mode = "server";
-  const char *path = SOCK_DEFAULT_PATH;
+  const char *path = default_socket_path();
   bool run_app = true;
 
   if (argc >= 2) {
@@ -182,9 +187,12 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
   int8_t rc = CLI_OK;
   while (rc == CLI_OK && !s_stop) {
     /* Sleep until input arrives (or the poll interval elapses for timers), instead of
-     * spinning on the non-blocking available() check. */
-    (void)wait_readable_or_stop(((cli_unix_socket_ctx_struct_t *)cli->transport.ctx)->fd,
-                                CLI_TRANSPORT_POLL_MS);
+     * spinning on the non-blocking available() check. Not before the banner and the first
+     * prompt: those are shown without waiting for input. */
+    if (cli_get_session_state(cli) == CLI_SESSION_RUN) {
+      (void)wait_readable_or_stop(((cli_unix_socket_ctx_struct_t *)cli->transport.ctx)->fd,
+                                  CLI_TRANSPORT_POLL_MS);
+    }
     if (!s_stop) {
       rc = cli_session_engine(cli);
     }
@@ -299,6 +307,8 @@ static void register_commands(cli_struct_t *cli) {
  */
 static void setup_session(cli_struct_t *cli, uint32_t session_id) {
   demo_setup_session(cli, &s_app, session_id, 8800, 7500, CLI_DEMO_BANNER_UNIX);
+  /* One client at a time: an idle connection is closed so the next client can get in. */
+  cli_set_idle_timeout_mode(cli, CLI_IDLE_TIMEOUT_POLICY_CLOSE);
 }
 
 /**
@@ -413,10 +423,13 @@ static void *relay_writer_fn(void *arg) {
 
   while (!relay->done) {
     ssize_t n = read(STDIN_FILENO, &byte, 1);
-    if (n <= 0) {
+    if (n == 0) {
+      /* End of input (e.g. piped commands): tell the server, which ends the session after
+       * the commands sent so far; the reader keeps printing the replies until then. */
+      (void)shutdown(relay->fd, SHUT_WR);
       break;
     }
-    if (write(relay->fd, &byte, 1) < 0) {
+    if (n < 0 || write(relay->fd, &byte, 1) < 0) {
       break;
     }
   }
@@ -433,8 +446,10 @@ static void client_raw_mode(void) {
     if (tcgetattr(STDIN_FILENO, &s_orig_term) == 0) {
       term = s_orig_term;
       /* ISIG off: Ctrl-C / Ctrl-Z go to the remote CLI instead of killing this client with
-       * the terminal still in no-echo mode. */
-      term.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE | ISIG);
+       * the terminal still in no-echo mode. IXON / IEXTEN off: Ctrl-S, Ctrl-Q, Ctrl-V and
+       * Ctrl-O are passed through instead of being handled by the terminal. */
+      term.c_lflag &= (tcflag_t) ~(ICANON | ECHO | ECHOE | ISIG | IEXTEN);
+      term.c_iflag &= (tcflag_t) ~(IXON);
       term.c_cc[VMIN] = 1;
       term.c_cc[VTIME] = 0;
       if (tcsetattr(STDIN_FILENO, TCSANOW, &term) == 0) {
@@ -476,6 +491,11 @@ static int run_client(const char *path) {
     perror("cli_unix_connect");
     fprintf(stderr, "Failed to connect to '%s'\n", path);
     fprintf(stderr, "  (Is the server running?)\n");
+    status = 1;
+  } else if (!cli_unix_peer_is_self(fd)) {
+    /* Someone else's socket at this path: never send it a username and password. */
+    fprintf(stderr, "Refusing '%s': the server is not running as this user\n", path);
+    cli_unix_close(fd);
     status = 1;
   } else {
     printf("Connected. Type 'exit' or 'quit' to end the session.\n\n");
@@ -519,7 +539,28 @@ static void print_usage(const char *prog) {
           "Usage:\n"
           "  %s [<path>]           server (default: %s)\n"
           "  %s client [<path>]    client relay (stdin/stdout)\n",
-          prog, SOCK_DEFAULT_PATH, prog);
+          prog, default_socket_path(), prog);
+}
+
+/**
+ * @brief Default socket path: @c $XDG_RUNTIME_DIR/OpenLibCLI.sock, a directory only this
+ *        user can write to, or @c SOCK_DEFAULT_PATH when the variable is not set (or the
+ *        path would be too long).
+ *
+ * @return Path string (static storage).
+ */
+static const char *default_socket_path(void) {
+  const char *dir = getenv("XDG_RUNTIME_DIR");
+  const char *path = SOCK_DEFAULT_PATH;
+
+  if (dir != NULL && dir[0] == '/') {
+    int n = snprintf(s_default_path, sizeof(s_default_path), "%s/%s", dir, SOCK_DEFAULT_NAME);
+    if (n > 0 && (size_t)n < sizeof(s_default_path)) {
+      path = s_default_path;
+    }
+  }
+
+  return path;
 }
 #endif
 

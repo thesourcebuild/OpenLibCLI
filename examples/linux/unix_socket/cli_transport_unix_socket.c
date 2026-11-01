@@ -14,6 +14,10 @@
  * Includes
  *=======================================================================================*/
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE /* struct ucred / SO_PEERCRED; must precede every system header */
+#endif
+
 #include "cli_transport_unix_socket.h"
 
 #if ENV_IS_UNIX_LIKE
@@ -93,7 +97,10 @@ int32_t cli_unix_listen(const char *path) {
       memset(&addr, 0, sizeof(addr));
       addr.sun_family = AF_UNIX;
       memcpy(addr.sun_path, path, strlen(path) + 1U);
-      if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(fd, 1) < 0) {
+      /* Owner-only before listen(): other users can neither connect to the CLI nor read
+       * what it sends. */
+      if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 || chmod(path, 0600) < 0 ||
+          listen(fd, 1) < 0) {
         int saved = errno;
         close(fd);
         errno = saved;
@@ -146,6 +153,28 @@ int32_t cli_unix_connect(const char *path) {
   }
 
   return fd;
+}
+
+bool cli_unix_peer_is_self(int32_t fd) {
+  bool same = false;
+
+#if defined(SO_PEERCRED)
+  struct ucred cred;
+  socklen_t len = (socklen_t)sizeof(cred);
+
+  if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0) {
+    same = (cred.uid == geteuid());
+  }
+#else
+  uid_t uid;
+  gid_t gid;
+
+  if (getpeereid(fd, &uid, &gid) == 0) {
+    same = (uid == geteuid());
+  }
+#endif
+
+  return same;
 }
 
 void cli_unix_socket_init(cli_unix_socket_ctx_struct_t *ctx, cli_transport_struct_t *transport,

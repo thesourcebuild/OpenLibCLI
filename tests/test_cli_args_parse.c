@@ -32,8 +32,6 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <math.h>
-#include <float.h>
 
 #include "utils/cli_args_parse.h"
 
@@ -413,11 +411,30 @@ static void test_parse_f64(void) {
   ASSERT_DBL_NEAR(v, 1.0, 1e-15);
   ASSERT_FALSE(parse_f64("1e309", &v));
   ASSERT_FALSE(parse_f64("1e999999999", &v));
-  /* Products that round up to infinity in the last scaling step are overflow too */
-  ASSERT_FALSE(parse_f64("1.7976931348623158e308", &v));
-  ASSERT_FALSE(parse_f64("-1.797693134862316e308", &v));
+  /* Correct rounding: the text of DBL_MAX (and anything below DBL_MAX + half an ulp) is
+   * DBL_MAX; from that bound on it is overflow. */
   ASSERT_TRUE(parse_f64("1.7976931348623157e308", &v));
-  ASSERT_TRUE(isfinite(v));
+  ASSERT_TRUE(v == DBL_MAX);
+  ASSERT_TRUE(parse_f64("1.7976931348623158e308", &v));
+  ASSERT_TRUE(v == DBL_MAX);
+  ASSERT_FALSE(parse_f64("-1.797693134862316e308", &v));
+  ASSERT_TRUE(parse_f64("1e300", &v));
+  ASSERT_TRUE(v == 1e300);
+  ASSERT_TRUE(parse_f64("1e-307", &v));
+  ASSERT_TRUE(v == 1e-307);
+  ASSERT_TRUE(parse_f64("4.9406564584124654e-324", &v)); /* smallest subnormal */
+  ASSERT_TRUE(v > 0.0 && v < DBL_MIN);
+  {
+    /* Printing with %.17g and parsing back gives the same double. */
+    static const double samples[] = {0.1, 1.0 / 3.0, 2.0 / 3.0, 1e23, 5e-324, 123456.789e200,
+                                     DBL_MIN, 0.30000000000000004};
+    char text[40];
+    for (size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); i++) {
+      (void)snprintf(text, sizeof(text), "%.17g", samples[i]);
+      ASSERT_TRUE(parse_f64(text, &v));
+      ASSERT_TRUE(v == samples[i]);
+    }
+  }
   ASSERT_FALSE(parse_f64("inf", &v));
   ASSERT_FALSE(parse_f64("nan", &v));
   ASSERT_TRUE(parse_f64("0e999999999", &v));
@@ -439,6 +456,14 @@ static void test_parse_f64(void) {
   ASSERT_FALSE(parse_f64("1e", &v));
   ASSERT_FALSE(parse_f64("1e-", &v));
   ASSERT_FALSE(parse_f64("1e+", &v));
+  /* Strict syntax: none of what strtod() would also accept */
+  ASSERT_FALSE(parse_f64(" 1", &v));
+  ASSERT_FALSE(parse_f64("1 ", &v));
+  ASSERT_FALSE(parse_f64("0x1p3", &v));
+  ASSERT_FALSE(parse_f64("1,5", &v));
+  ASSERT_FALSE(parse_f64("infinity", &v));
+  ASSERT_FALSE(parse_f64("--1", &v));
+  ASSERT_FALSE(parse_f64("1e5.0", &v));
   TEST_END();
 }
 
@@ -462,8 +487,16 @@ static void test_parse_f32(void) {
   ASSERT_TRUE(v == FLT_MAX);
   ASSERT_TRUE(parse_f32("-3.4028235e38", &v));
   ASSERT_TRUE(v == -FLT_MAX);
+  ASSERT_TRUE(parse_f32("3.4028235677973366e38", &v)); /* just below the overflow bound */
+  ASSERT_TRUE(v == FLT_MAX);
   ASSERT_FALSE(parse_f32("3.4028236e38", &v));
   ASSERT_FALSE(parse_f32("1e39", &v));
+
+  /* Rounded once, directly to float (rounding via double would give 16777216 and 1.0) */
+  ASSERT_TRUE(parse_f32("16777217.000000001", &v));
+  ASSERT_TRUE(v == 16777218.0f);
+  ASSERT_TRUE(parse_f32("1.00000005960464477550", &v));
+  ASSERT_TRUE(v == 1.00000011920928955078125f);
 
   ASSERT_FALSE(parse_f32("", &v));
   ASSERT_FALSE(parse_f32("abc", &v));
@@ -475,6 +508,7 @@ static void test_parse_f32(void) {
  * strtol-backed Parser Tests
  *=======================================================================================*/
 
+#if CLI_ARGS_PARSE_HAVE_STRTOLL
 static void test_strtol_parse_u64(void) {
   TEST_START("strtol_parse_u64");
   uint64_t v;
@@ -525,6 +559,7 @@ static void test_strtol_parse_i64(void) {
   ASSERT_FALSE(strtol_parse_i64("0xGG", &v));
   TEST_END();
 }
+#endif /* CLI_ARGS_PARSE_HAVE_STRTOLL */
 
 static void test_strtol_parse_u32(void) {
   TEST_START("strtol_parse_u32");
@@ -920,8 +955,10 @@ int main(void) {
 
   /* strtol-backed parsers */
   printf("\n--- strtol-backed ---\n");
+#if CLI_ARGS_PARSE_HAVE_STRTOLL
   RUN_SUITE(test_strtol_parse_u64);
   RUN_SUITE(test_strtol_parse_i64);
+#endif
   RUN_SUITE(test_strtol_parse_u32);
   RUN_SUITE(test_strtol_parse_i32);
   RUN_SUITE(test_strtol_parse_u16);

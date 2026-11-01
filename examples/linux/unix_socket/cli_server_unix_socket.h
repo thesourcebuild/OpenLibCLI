@@ -33,18 +33,27 @@ extern "C" {
  * Public Defines
  *=======================================================================================*/
 
+/** @brief Socket file name used in @c $XDG_RUNTIME_DIR (the default location). */
+#define SOCK_DEFAULT_NAME "OpenLibCLI.sock"
+
+#ifndef SOCK_DEFAULT_PATH
 /**
- * @brief Default filesystem path for the UNIX domain socket.
+ * @brief Socket path used when @c $XDG_RUNTIME_DIR is not set.
+ *
+ * @c /tmp is shared by all users: another user could create a socket at this path
+ * first. The server then fails with @c EADDRINUSE, and the client refuses a
+ * server that does not run as the same user (@c cli_unix_peer_is_self()).
  *
  * Connect with:
  * @code
- *   socat - UNIX-CONNECT:/tmp/OpenLibCLI.sock
- *   nc -U /tmp/OpenLibCLI.sock
+ *   socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/OpenLibCLI.sock
+ *   nc -U $XDG_RUNTIME_DIR/OpenLibCLI.sock
  * @endcode
  *
  * Override at compile time with @c -DSOCK_DEFAULT_PATH=\"/run/my_cli.sock\".
  */
 #define SOCK_DEFAULT_PATH "/tmp/OpenLibCLI.sock"
+#endif
 
 /*=======================================================================================
  * Public Macros
