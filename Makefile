@@ -125,9 +125,14 @@ CFLAGS ?= -std=c99 -Wall -Wextra -Werror -Wpedantic -Wshadow \
             -O2 -g -ffunction-sections -fdata-sections
 CFLAGS += -I$(INC_DIR)
 
-# POSIX feature test macro (nanosleep / timespec in cli_demo_setup.c)
+# POSIX feature test macros for -std=c99: POSIX.1-2008 (nanosleep, clock_gettime, lstat,
+# mkfifo, poll, ...). A POSIX level hides the macOS extensions the examples use
+# (getpeereid, SO_NOSIGPIPE), so those are requested explicitly there.
 ifneq ($(PLATFORM),windows)
-CFLAGS += -D_POSIX_C_SOURCE=199309L
+CFLAGS += -D_POSIX_C_SOURCE=200809L
+endif
+ifeq ($(PLATFORM),macos)
+CFLAGS += -D_DARWIN_C_SOURCE
 endif
 
 # Linker flags for host examples
@@ -402,7 +407,7 @@ ifeq ($(BUILD_EXAMPLE_PIPE),1)
 cli_server_pipe pipe: $(PIPE_BIN)
 
 ifeq ($(PLATFORM),windows)
-PIPE_THREAD_LIBS :=
+PIPE_THREAD_LIBS := -ladvapi32
 else
 PIPE_THREAD_LIBS := -lpthread
 endif

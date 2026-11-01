@@ -1571,6 +1571,200 @@ static void test_relogin_not_in_new_history(void) {
   TEST_END();
 }
 
+/* Round 5 regressions ------------------------------------------------------------------*/
+
+static int8_t periodic_restart_cb(cli_struct_t *cli) {
+  cli_restart_session(cli);
+  return CLI_OK;
+}
+
+static void test_restart_holds_pending_input(void) {
+  TEST_START("restart_holds_pending_input");
+
+  /* Idle reset in the tick that also brings a keystroke: it waits for the login prompt
+   * instead of reaching the command editor (no command list before login). */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_idle_timeout(&s_cli, 5U);
+  session_start();
+  type("admin\rpw\r");
+  s_now += 10U;
+  out_clear();
+  type("?");
+  ASSERT_OUT("Idle timeout. Session restarted.");
+  ASSERT_NOT_OUT("Show commands");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  ASSERT_STR_EQ(s_cli.input, "?");
+
+  /* Without login: the whole line appears after the new prompt and runs as shown. */
+  session_new();
+  cli_set_idle_timeout(&s_cli, 5U);
+  session_start();
+  type("x");
+  s_now += 10U;
+  out_clear();
+  type("echo abc\r"); /* the restart dropped the typed "x" */
+  ASSERT_OUT("rtr> echo abc");
+  ASSERT_OUT("ARGS [abc]");
+
+  /* Same for a periodic callback that restarts the session. */
+  session_new();
+  cli_set_periodic_cb(&s_cli, periodic_restart_cb);
+  cli_set_periodic_interval(&s_cli, 1U);
+  session_start();
+  s_now += 2U;
+  out_clear();
+  type("echo abc\r");
+  ASSERT_OUT("rtr> echo abc");
+  ASSERT_OUT("ARGS [abc]");
+  TEST_END();
+}
+
+static int8_t cmd_enable_twice(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                               const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  (void)cli_exec(cli, "enable");
+  return cli_exec(cli, "enable"); /* a password prompt is already pending: refused */
+}
+
+static char s_enable_user[CLI_MAX_USERNAME_LEN + 1];
+
+static int8_t enable_user_cb(cli_struct_t *cli, const char *user, const char *pass) {
+  (void)cli;
+  (void)snprintf(s_enable_user, sizeof(s_enable_user), "%s", user);
+  return (strcmp(pass, "s3") == 0) ? CLI_OK : CLI_ERR_AUTH;
+}
+
+static void test_enable_state_handling(void) {
+  TEST_START("enable_state_handling");
+
+  /* A second 'enable' while the password prompt is pending must not become the state to
+   * return to: after the right secret the shell works normally again. */
+  session_new();
+  ASSERT_EQ(cli_set_enable_secret(&s_cli, "s3"), CLI_OK);
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "dbl", cmd_enable_twice, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  session_start();
+  type("dbl\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_ENABLE_MODE_PASSWORD);
+  type("s3\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  ASSERT_FALSE(s_cli.auth_state == CLI_AUTH_ENABLE_MODE_PASSWORD);
+  out_clear();
+  type("echo x\r");
+  ASSERT_OUT("ARGS [x]");
+
+  /* The end of an enable lockout keeps the logged-in user's name. */
+  session_new();
+  (void)cli_add_user(&s_cli, "alice", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_enable_privilege_cb(&s_cli, enable_user_cb);
+  cli_set_auth_failure_mode(&s_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
+  cli_set_auth_lockout_duration(&s_cli, 30U);
+  session_start();
+  type("alice\rpw\r");
+  type("enable\rx\renable\rx\renable\rx\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  s_now += 31U;
+  (void)run();
+  s_enable_user[0] = '\0';
+  type("enable\rs3\r");
+  ASSERT_STR_EQ(s_enable_user, "alice");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  TEST_END();
+}
+
+static void test_history_browse_ends_on_submit(void) {
+  TEST_START("history_browse_ends_on_submit");
+  session_new();
+  session_start();
+
+  type("echo aa\r");
+  type("echo bb\r");
+  type("\x1b[A\r"); /* re-run the newest entry: a duplicate, not stored again */
+  type("\x1b[A");
+  ASSERT_STR_EQ(s_cli.input, "echo bb");
+
+  /* Browsing, then submitting an empty line, also ends the browse. */
+  type("\x1b[A\x15\r");
+  type("\x1b[A");
+  ASSERT_STR_EQ(s_cli.input, "echo bb");
+  TEST_END();
+}
+
+static int8_t quit_hook_partial(cli_struct_t *cli) {
+  cli_print(cli, "Really quit?");
+  return CLI_ERR;
+}
+
+static void test_ctrl_d_output_like_quit(void) {
+  TEST_START("ctrl_d_output_like_quit");
+  session_new();
+  cli_set_quit_cb(&s_cli, quit_hook_partial);
+  session_start();
+
+  type("\x04");
+  ASSERT_OUT("Really quit?\r\nrtr> ");
+  TEST_END();
+}
+
+static void test_exec_from_outside_redraws(void) {
+  TEST_START("exec_from_outside_redraws");
+  session_new();
+  session_start();
+
+  /* A callback runs a command while the user is typing: its output goes below the line,
+   * then the prompt and the typed text are shown again. */
+  type("ec");
+  out_clear();
+  ASSERT_EQ(cli_exec(&s_cli, "echo hi"), CLI_OK);
+  ASSERT_OUT("\r\nARGS [hi]\r\n");
+  ASSERT_OUT("rtr> ec");
+  type("ho x\r");
+  ASSERT_OUT("ARGS [x]");
+  TEST_END();
+}
+
+static void test_escape_parameter_saturates(void) {
+  TEST_START("escape_parameter_saturates");
+  session_new();
+  session_start();
+
+  type("\x1b[999999");
+  ASSERT_EQ(s_cli.esc_param, 9999);
+  type("~x");
+  ASSERT_STR_EQ(s_cli.input, "x");
+  TEST_END();
+}
+
+static void test_registration_reports_failures(void) {
+  cli_transport_struct_t tp;
+  cli_cmd_struct_t small_pool[4];
+
+  TEST_START("registration_reports_failures");
+  session_new();
+
+  /* A mode name that does not fit is refused; the old one stays. */
+  ASSERT_EQ(cli_set_mode_name(&s_cli, CLI_MODE_USER_BASE, "lab"), CLI_OK);
+  ASSERT_EQ(cli_set_mode_name(&s_cli, CLI_MODE_USER_BASE,
+                              "a-mode-name-that-is-much-longer-than-the-buffer"),
+            CLI_ERR);
+
+  /* Built-ins that do not fit the pool are reported. */
+  memset(&tp, 0, sizeof(tp));
+  tp.available = t_available;
+  tp.read = t_read;
+  tp.write = t_write;
+  cli_init(&s_cli, "rtr", &tp, NULL, small_pool, 4);
+  ASSERT_EQ(cli_add_builtin_cmds(&s_cli), CLI_ERR);
+  session_new();
+  ASSERT_EQ(s_cli.cmd_pool_count > 0, true);
+  TEST_END();
+}
+
 static void test_null_safety(void) {
   TEST_START("null_safety");
   session_new();
@@ -1668,6 +1862,13 @@ int main(void) {
   RUN_SUITE(test_lockout_survives_idle_timeout);
   RUN_SUITE(test_empty_word_is_no_command);
   RUN_SUITE(test_relogin_not_in_new_history);
+  RUN_SUITE(test_restart_holds_pending_input);
+  RUN_SUITE(test_enable_state_handling);
+  RUN_SUITE(test_history_browse_ends_on_submit);
+  RUN_SUITE(test_ctrl_d_output_like_quit);
+  RUN_SUITE(test_exec_from_outside_redraws);
+  RUN_SUITE(test_escape_parameter_saturates);
+  RUN_SUITE(test_registration_reports_failures);
 
   printf("\n--- robustness ---\n");
   RUN_SUITE(test_write_error_ends_session);

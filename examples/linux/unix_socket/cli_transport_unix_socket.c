@@ -24,6 +24,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -77,6 +78,7 @@ static cli_transport_ret_t cli_unix_socket_transport_available(void *raw);
 static cli_transport_ret_t cli_unix_socket_transport_read(void *raw);
 static cli_transport_ret_t cli_unix_socket_transport_write(void *raw, const uint8_t *buf,
                                                            cli_transport_buflen_t len);
+static bool cli_unix_lock_path(const char *path, int32_t *lock_fd);
 static bool cli_unix_remove_stale(const char *path);
 #endif
 
@@ -85,33 +87,62 @@ static bool cli_unix_remove_stale(const char *path);
  *=======================================================================================*/
 
 #if ENV_IS_UNIX_LIKE
-int32_t cli_unix_listen(const char *path) {
+int32_t cli_unix_listen(const char *path, cli_unix_listener_struct_t *listener) {
   struct sockaddr_un addr;
-  int32_t fd = CLI_UNIX_SOCK_ERR;
+  int32_t rc = CLI_UNIX_SOCK_ERR;
+
+  listener->fd = CLI_UNIX_SOCK_ERR;
+  listener->lock_fd = CLI_UNIX_SOCK_ERR;
 
   if (path == NULL || strlen(path) >= sizeof(addr.sun_path)) {
     errno = ENAMETOOLONG;
-  } else if (cli_unix_remove_stale(path)) {
-    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  } else if (cli_unix_lock_path(path, &listener->lock_fd) && cli_unix_remove_stale(path)) {
+    int32_t fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    bool bound = false;
+
     if (fd >= 0) {
       memset(&addr, 0, sizeof(addr));
       addr.sun_family = AF_UNIX;
       memcpy(addr.sun_path, path, strlen(path) + 1U);
+      bound = (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0);
       /* Owner-only before listen(): other users can neither connect to the CLI nor read
        * what it sends. */
-      if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 || chmod(path, 0600) < 0 ||
-          listen(fd, 1) < 0) {
+      if (bound && chmod(path, 0600) == 0 && listen(fd, 1) == 0) {
+        listener->fd = fd;
+        rc = CLI_UNIX_SOCK_OK;
+      } else {
         int saved = errno;
         close(fd);
+        if (bound) {
+          (void)unlink(path);
+        }
         errno = saved;
-        fd = CLI_UNIX_SOCK_ERR;
       }
     }
   } else {
-    /* errno set by cli_unix_remove_stale(). */
+    /* errno set by cli_unix_lock_path() / cli_unix_remove_stale(). */
   }
 
-  return fd;
+  if (rc != CLI_UNIX_SOCK_OK && listener->lock_fd >= 0) {
+    int saved = errno;
+    close(listener->lock_fd);
+    listener->lock_fd = CLI_UNIX_SOCK_ERR;
+    errno = saved;
+  }
+
+  return rc;
+}
+
+void cli_unix_listener_close(cli_unix_listener_struct_t *listener, const char *path) {
+  if (listener->fd >= 0) {
+    close(listener->fd);
+    listener->fd = CLI_UNIX_SOCK_ERR;
+    (void)unlink(path); /* while the lock is still held: never another server's socket */
+  }
+  if (listener->lock_fd >= 0) {
+    close(listener->lock_fd); /* releases the lock */
+    listener->lock_fd = CLI_UNIX_SOCK_ERR;
+  }
 }
 
 int32_t cli_unix_accept(int32_t listen_fd) {
@@ -158,7 +189,7 @@ int32_t cli_unix_connect(const char *path) {
 bool cli_unix_peer_is_self(int32_t fd) {
   bool same = false;
 
-#if defined(SO_PEERCRED)
+#if defined(__linux__)
   struct ucred cred;
   socklen_t len = (socklen_t)sizeof(cred);
 
@@ -166,6 +197,7 @@ bool cli_unix_peer_is_self(int32_t fd) {
     same = (cred.uid == geteuid());
   }
 #else
+  /* BSDs (incl. OpenBSD, whose SO_PEERCRED uses another struct) and macOS. */
   uid_t uid;
   gid_t gid;
 
@@ -193,10 +225,6 @@ void cli_unix_close(int32_t fd) {
     close(fd);
   }
 }
-
-void cli_unix_unlink(const char *path) {
-  unlink(path);
-}
 #endif
 
 /*=======================================================================================
@@ -205,20 +233,60 @@ void cli_unix_unlink(const char *path) {
 
 #if ENV_IS_UNIX_LIKE
 /**
- * @brief Make @p path free for a new listening socket.
+ * @brief Take the server lock for @p path: an exclusive lock on "<path>.lock".
  *
- * A leftover socket file from a crashed server is removed. Anything else is
- * left alone: a non-socket file (e.g. a mistyped path) is never deleted, and a
- * socket that a server is still listening on is in use.
+ * Held for as long as the server listens, so only one server uses a path at a time and
+ * a socket file found at @p path while holding it is a leftover that may be removed.
+ * The lock file itself stays on disk (removing it would let two servers lock different
+ * files of the same name).
  *
- * The socket is probed with a non-blocking connect: only a refused connection
- * (nobody listening) marks it stale. A full backlog (@c EAGAIN) means a busy
- * server, and any other failure is reported rather than guessed at.
+ * @param[in]  path     Socket path.
+ * @param[out] lock_fd  Receives the descriptor that holds the lock.
+ *
+ * @return @c true on success; @c false with @c errno = @c EADDRINUSE when another server
+ *         holds it, or the cause of the failure.
+ */
+static bool cli_unix_lock_path(const char *path, int32_t *lock_fd) {
+  char lock_path[sizeof(((struct sockaddr_un *)0)->sun_path) + 5U];
+  int n = snprintf(lock_path, sizeof(lock_path), "%s.lock", path);
+  int32_t fd = -1;
+  bool ok = (n > 0 && (size_t)n < sizeof(lock_path));
+
+  if (ok) {
+    fd = open(lock_path, O_RDWR | O_CREAT, 0600);
+    ok = (fd >= 0);
+  }
+  if (ok) {
+    struct flock fl;
+
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = F_WRLCK; /* whole file */
+    fl.l_whence = SEEK_SET;
+    if (fcntl(fd, F_SETLK, &fl) != 0) {
+      int saved = errno;
+      close(fd);
+      errno = (saved == EACCES || saved == EAGAIN) ? EADDRINUSE : saved;
+      ok = false;
+    }
+  }
+  if (ok) {
+    *lock_fd = fd;
+  }
+
+  return ok;
+}
+
+/**
+ * @brief Make @p path free for a new listening socket (called with the server lock held).
+ *
+ * A socket file there is left over from a server that is gone, since no other server
+ * holds the lock: it is removed. Anything else (e.g. a mistyped path naming a regular
+ * file) is never deleted.
  *
  * @param[in] path  Socket path.
  *
  * @return @c true if @p path does not exist (any more); @c false with @c errno set
- *         (@c ENOTSOCK, @c EADDRINUSE or the probe's error) otherwise.
+ *         (@c ENOTSOCK, or the error of @c unlink()) otherwise.
  */
 static bool cli_unix_remove_stale(const char *path) {
   struct stat st;
@@ -229,31 +297,7 @@ static bool cli_unix_remove_stale(const char *path) {
       errno = ENOTSOCK;
       free_path = false;
     } else {
-      struct sockaddr_un addr;
-      int32_t probe = socket(AF_UNIX, SOCK_STREAM, 0);
-
-      free_path = false;
-      if (probe >= 0) {
-        int flags = fcntl(probe, F_GETFL, 0);
-        int rc = -1;
-
-        memset(&addr, 0, sizeof(addr));
-        addr.sun_family = AF_UNIX;
-        memcpy(addr.sun_path, path, strlen(path) + 1U);
-        if (flags >= 0 && fcntl(probe, F_SETFL, flags | O_NONBLOCK) == 0) {
-          rc = connect(probe, (struct sockaddr *)&addr, sizeof(addr));
-        }
-        int saved = errno;
-        close(probe);
-
-        if (rc == 0 || saved == EAGAIN || saved == EINPROGRESS) {
-          errno = EADDRINUSE; /* a server is listening (possibly busy) */
-        } else if (saved == ECONNREFUSED) {
-          free_path = (unlink(path) == 0 || errno == ENOENT);
-        } else {
-          errno = saved;
-        }
-      }
+      free_path = (unlink(path) == 0 || errno == ENOENT);
     }
   }
 

@@ -20,14 +20,17 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
+#include <sddl.h>
 #else
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -40,6 +43,16 @@
 #if ENV_IS_WINDOWS
 /** @brief Size of the internal Windows named-pipe path buffer. */
 #define PIPE_PATH_MAX 256
+
+/** @brief Prefix of the mutex that reserves a pipe name for one server. */
+#define PIPE_LOCK_PREFIX "Global\\OpenLibCLI.pipe:"
+
+/** @brief Room for an owner-only security descriptor in SDDL (the SID string is <= 184). */
+#define PIPE_SDDL_MAX 256
+
+#ifndef PIPE_REJECT_REMOTE_CLIENTS
+#define PIPE_REJECT_REMOTE_CLIENTS 0x00000008 /* missing from older SDK headers */
+#endif
 #else
 /** @brief Maximum FIFO path length for POSIX named pipes. */
 #define FIFO_PATH_MAX 512
@@ -58,7 +71,13 @@
  * Private Types
  *=======================================================================================*/
 
-/* No private types. */
+#if ENV_IS_WINDOWS
+/** @brief A TOKEN_USER with room for the largest SID, correctly aligned. */
+typedef union {
+  TOKEN_USER user;
+  BYTE bytes[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+} win_token_user_union_t;
+#endif
 
 /*=======================================================================================
  * External Data Variables
@@ -78,12 +97,18 @@
 
 #if ENV_IS_WINDOWS
 static bool build_win_pipe_path(char *buf, int32_t buflen, const char *name);
+static bool win_reserve_name(const char *path, void **h_lock);
+static bool win_process_user(HANDLE process, win_token_user_union_t *buf, PSID *sid);
+static bool win_owner_only_security(SECURITY_ATTRIBUTES *sa);
+static bool win_pipe_server_is_self(HANDLE pipe);
 static BOOL win_overlapped_finish(HANDLE handle, OVERLAPPED *ov, BOOL started, DWORD timeout_ms,
                                   DWORD *count);
 #else
 static bool build_fifo_paths(const char *name, char *in_path, char *out_path, size_t size);
-static bool fifo_in_use(const char *in_path);
+static bool fifo_reserve_name(const char *name, char *buf, size_t size, int32_t *lock_fd);
 static bool fifo_create(const char *path);
+static bool fifo_is_private(int32_t fd);
+static bool fifo_wait_connected(int32_t rfd, int32_t wfd, uint64_t deadline);
 static uint64_t monotonic_ms(void);
 #endif
 static cli_transport_ret_t cli_pipe_transport_available(void *raw);
@@ -101,21 +126,38 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
   int32_t rc = CLI_PIPE_ERR;
   HANDLE handle = INVALID_HANDLE_VALUE;
   HANDLE event = NULL;
+  bool reserved_here = false;
+  bool ok = build_win_pipe_path(path, sizeof(path), name);
 
   ctx->h_read = NULL;
   ctx->h_write = NULL;
   ctx->h_event = NULL;
-
-  /* Overlapped, so writes can time out. Unlimited instances: a session ends by closing its
-   * instance (see cli_named_pipe_disconnect()), which lingers until that client has read
-   * the rest and closed, and the next session's instance must not wait for that. Only one
-   * instance listens at a time, so a second client still finds the server busy. */
-  if (build_win_pipe_path(path, sizeof(path), name)) {
-    handle = CreateNamedPipeA(path, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                              PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                              PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, NULL);
-  } else {
+  if (!ok) {
     SetLastError(ERROR_FILENAME_EXCED_RANGE); /* a truncated name would be another pipe */
+  } else if (ctx->h_lock == NULL) {
+    ok = win_reserve_name(path, &ctx->h_lock);
+    reserved_here = ok;
+  } else {
+    /* Name already reserved by this server's earlier listen. */
+  }
+
+  if (ok) {
+    SECURITY_ATTRIBUTES sa;
+
+    /* Overlapped, so writes can time out. Only this user, only local clients. Unlimited
+     * instances: a session ends by closing its instance (see cli_named_pipe_disconnect()),
+     * which lingers until that client has read the rest and closed, and the next session's
+     * instance must not wait for that. Only one instance listens at a time, so a second
+     * client still finds the server busy. */
+    if (win_owner_only_security(&sa)) {
+      handle = CreateNamedPipeA(
+          path, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+          PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+          PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, &sa);
+      DWORD error = GetLastError();
+      LocalFree(sa.lpSecurityDescriptor);
+      SetLastError(error);
+    }
   }
   if (handle != INVALID_HANDLE_VALUE) {
     event = CreateEventA(NULL, TRUE, FALSE, NULL);
@@ -155,13 +197,19 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
     }
   }
 
-  if (rc != CLI_PIPE_OK && handle != INVALID_HANDLE_VALUE) {
-    DWORD error = GetLastError();
+  if (rc != CLI_PIPE_OK) {
+    DWORD error = GetLastError(); /* report the cause, not the cleanup's result */
     if (event != NULL) {
       CloseHandle(event);
     }
-    CloseHandle(handle);
-    SetLastError(error); /* report the cause, not CloseHandle's result */
+    if (handle != INVALID_HANDLE_VALUE) {
+      CloseHandle(handle);
+    }
+    if (reserved_here) {
+      CloseHandle((HANDLE)ctx->h_lock);
+      ctx->h_lock = NULL;
+    }
+    SetLastError(error);
   }
 
   return rc;
@@ -177,14 +225,17 @@ int32_t cli_named_pipe_connect(const char *name, cli_pipe_ctx_struct_t *ctx) {
   ctx->h_read = NULL;
   ctx->h_write = NULL;
   ctx->h_event = NULL;
+  ctx->h_lock = NULL;
   if (!trying) {
     SetLastError(ERROR_FILENAME_EXCED_RANGE); /* a truncated name would be another pipe */
   }
 
   /* Documented client pattern: retry while the single listening instance is busy or not
-   * yet re-created, with one overall deadline. */
+   * yet re-created, with one overall deadline. The server may identify this client, never
+   * act as it (SECURITY_IDENTIFICATION). */
   while (trying) {
-    handle = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    handle = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                         SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
     if (handle != INVALID_HANDLE_VALUE) {
       trying = false;
     } else {
@@ -206,9 +257,16 @@ int32_t cli_named_pipe_connect(const char *name, cli_pipe_ctx_struct_t *ctx) {
   }
 
   if (handle != INVALID_HANDLE_VALUE) {
-    ctx->h_read = (void *)handle;
-    ctx->h_write = (void *)handle;
-    rc = CLI_PIPE_OK;
+    /* Whoever created a pipe of this name first gets the connection: never send a login
+     * to a server that runs as another user. */
+    if (win_pipe_server_is_self(handle)) {
+      ctx->h_read = (void *)handle;
+      ctx->h_write = (void *)handle;
+      rc = CLI_PIPE_OK;
+    } else {
+      CloseHandle(handle);
+      SetLastError(ERROR_ACCESS_DENIED);
+    }
   }
 
   return rc;
@@ -249,25 +307,30 @@ void cli_pipe_init(cli_pipe_ctx_struct_t *ctx, cli_transport_struct_t *transport
 }
 
 void cli_pipe_close(cli_pipe_ctx_struct_t *ctx) {
-  if (ctx->h_read != NULL) {
-    CloseHandle((HANDLE)ctx->h_read);
-    if (ctx->h_write != ctx->h_read) {
-      CloseHandle((HANDLE)ctx->h_write);
-    }
-    ctx->h_read = NULL;
-    ctx->h_write = NULL;
-  }
-  if (ctx->h_event != NULL) {
-    CloseHandle((HANDLE)ctx->h_event);
-    ctx->h_event = NULL;
+  cli_named_pipe_disconnect(ctx);
+  if (ctx->h_lock != NULL) {
+    CloseHandle((HANDLE)ctx->h_lock); /* the last handle: the name is free again */
+    ctx->h_lock = NULL;
   }
 }
 
 void cli_named_pipe_disconnect(cli_pipe_ctx_struct_t *ctx) {
   /* Closing the instance never blocks (FlushFileBuffers() would, for as long as the client
    * does not read). Output already in the pipe stays readable: the client receives it and
-   * then ERROR_BROKEN_PIPE. No DisconnectNamedPipe(): it would discard that output. */
-  cli_pipe_close(ctx);
+   * then ERROR_BROKEN_PIPE. No DisconnectNamedPipe(): it would discard that output. A
+   * write end closed on its own (end of a relay's input) is NULL already. */
+  if (ctx->h_write != NULL && ctx->h_write != ctx->h_read) {
+    CloseHandle((HANDLE)ctx->h_write);
+  }
+  if (ctx->h_read != NULL) {
+    CloseHandle((HANDLE)ctx->h_read);
+  }
+  ctx->h_read = NULL;
+  ctx->h_write = NULL;
+  if (ctx->h_event != NULL) {
+    CloseHandle((HANDLE)ctx->h_event);
+    ctx->h_event = NULL;
+  }
 }
 #else
 int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
@@ -276,14 +339,22 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
   int32_t rfd = -1;
   int32_t wfd = -1;
   int32_t rc = CLI_PIPE_ERR;
+  bool reserved_here = false;
   bool in_created = false;
   bool out_created = false;
+  bool ok = true;
 
   ctx->read_fd = -1;
   ctx->write_fd = -1;
 
-  /* Fresh, owner-only FIFOs for every session (see fifo_create()). */
-  if (build_fifo_paths(name, in_path, out_path, sizeof(in_path)) && !fifo_in_use(in_path)) {
+  if (ctx->lock_fd < 0) {
+    ok = fifo_reserve_name(name, in_path, sizeof(in_path), &ctx->lock_fd);
+    reserved_here = ok;
+  }
+
+  /* Holding the name, FIFOs found on disk are leftovers: fresh, owner-only ones replace
+   * them for every session (see fifo_create()). */
+  if (ok && build_fifo_paths(name, in_path, out_path, sizeof(in_path))) {
     in_created = fifo_create(in_path);
     out_created = in_created && fifo_create(out_path);
   }
@@ -328,6 +399,10 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
     if (out_created) {
       unlink(out_path);
     }
+    if (reserved_here) {
+      close(ctx->lock_fd);
+      ctx->lock_fd = -1;
+    }
     errno = saved_errno;
   }
 
@@ -339,11 +414,13 @@ int32_t cli_named_pipe_connect(const char *name, cli_pipe_ctx_struct_t *ctx) {
   char out_path[FIFO_PATH_MAX];
   int32_t rc = CLI_PIPE_ERR;
   int32_t wfd = -1;
+  int32_t rfd = -1;
   bool trying = build_fifo_paths(name, in_path, out_path, sizeof(in_path));
   uint64_t deadline = monotonic_ms() + (uint64_t)CLI_PIPE_CONNECT_TIMEOUT_MS;
 
   ctx->read_fd = -1;
   ctx->write_fd = -1;
+  ctx->lock_fd = -1;
 
   /* <name>.in first, without blocking: it opens only while a server is listening (ENOENT
    * while it serves another client, ENXIO when nobody reads the FIFO). The server takes
@@ -362,21 +439,37 @@ int32_t cli_named_pipe_connect(const char *name, cli_pipe_ctx_struct_t *ctx) {
   }
 
   if (wfd >= 0) {
-    int32_t flags = fcntl(wfd, F_GETFL, 0);
-    int32_t rfd = -1;
+    /* Non-blocking open of <name>.out never waits, and completes the server's open. */
+    rfd = open(out_path, O_RDONLY | O_NONBLOCK);
+  }
+  if (rfd >= 0) {
+    int32_t rflags = fcntl(rfd, F_GETFL, 0);
+    int32_t wflags = fcntl(wfd, F_GETFL, 0);
 
-    if (flags >= 0 && fcntl(wfd, F_SETFL, flags & ~O_NONBLOCK) == 0) {
-      rfd = open(out_path, O_RDONLY); /* the server is waiting for this open */
-    }
-    if (rfd >= 0) {
+    /* Someone else's FIFOs at this path (a shared directory such as /tmp): never send them
+     * a username and password. */
+    if (!fifo_is_private(wfd) || !fifo_is_private(rfd)) {
+      errno = EPERM;
+    } else if (fifo_wait_connected(rfd, wfd, deadline) && rflags >= 0 && wflags >= 0 &&
+               fcntl(rfd, F_SETFL, rflags & ~O_NONBLOCK) == 0 &&
+               fcntl(wfd, F_SETFL, wflags & ~O_NONBLOCK) == 0) {
       ctx->read_fd = rfd;
       ctx->write_fd = wfd;
       rc = CLI_PIPE_OK;
     } else {
-      int saved_errno = errno;
-      close(wfd);
-      errno = saved_errno;
+      /* errno set by fifo_wait_connected() / fcntl(). */
     }
+  }
+
+  if (rc != CLI_PIPE_OK) {
+    int saved_errno = errno;
+    if (rfd >= 0) {
+      close(rfd);
+    }
+    if (wfd >= 0) {
+      close(wfd);
+    }
+    errno = saved_errno;
   }
 
   return rc;
@@ -389,8 +482,10 @@ int32_t cli_anon_pipe_create(cli_pipe_ctx_struct_t *server, cli_pipe_ctx_struct_
 
   server->read_fd = -1;
   server->write_fd = -1;
+  server->lock_fd = -1;
   client->read_fd = -1;
   client->write_fd = -1;
+  client->lock_fd = -1;
   if (pipe(s2c) == 0) {
     if (pipe(c2s) == 0) {
       server->read_fd = c2s[0];
@@ -417,6 +512,17 @@ void cli_pipe_init(cli_pipe_ctx_struct_t *ctx, cli_transport_struct_t *transport
 }
 
 void cli_pipe_close(cli_pipe_ctx_struct_t *ctx) {
+  cli_named_pipe_disconnect(ctx);
+  if (ctx->lock_fd >= 0) {
+    close(ctx->lock_fd); /* releases the lock: the name is free again */
+    ctx->lock_fd = -1;
+  }
+}
+
+void cli_named_pipe_disconnect(cli_pipe_ctx_struct_t *ctx) {
+  /* The FIFO names were removed when the session started, so the next listen creates new
+   * FIFOs this client cannot reach: closing is enough and never blocks. The client reads
+   * what is left, then sees end of file; its further writes fail with EPIPE. */
   if (ctx->read_fd >= 0) {
     close(ctx->read_fd);
     ctx->read_fd = -1;
@@ -425,13 +531,6 @@ void cli_pipe_close(cli_pipe_ctx_struct_t *ctx) {
     close(ctx->write_fd);
     ctx->write_fd = -1;
   }
-}
-
-void cli_named_pipe_disconnect(cli_pipe_ctx_struct_t *ctx) {
-  /* The FIFO names were removed when the session started, so the next listen creates new
-   * FIFOs this client cannot reach: closing is enough and never blocks. The client reads
-   * what is left, then sees end of file; its further writes fail with EPIPE. */
-  cli_pipe_close(ctx);
 }
 #endif
 
@@ -462,6 +561,134 @@ static bool build_win_pipe_path(char *buf, int32_t buflen, const char *name) {
   }
 
   return (n >= 0 && n < buflen);
+}
+
+/**
+ * @brief Reserve the pipe @p path for this server with a named mutex.
+ *
+ * The mutex exists as long as a handle to it is open; a second server finds it and
+ * fails. Mutex names are case-sensitive and may not contain '\\', pipe names are
+ * neither, so the name is lower-cased and '\\' becomes '/'.
+ *
+ * @param[in]  path    Full pipe path.
+ * @param[out] h_lock  Receives the mutex handle.
+ *
+ * @return @c true on success; @c false with @c ERROR_ALREADY_EXISTS when another server
+ *         holds the name, or the cause of the failure.
+ */
+static bool win_reserve_name(const char *path, void **h_lock) {
+  char lock_name[sizeof(PIPE_LOCK_PREFIX) + PIPE_PATH_MAX];
+  size_t pos = sizeof(PIPE_LOCK_PREFIX) - 1U;
+  HANDLE mutex;
+  bool ok;
+
+  memcpy(lock_name, PIPE_LOCK_PREFIX, pos);
+  for (const char *p = path; *p != '\0'; p++) {
+    lock_name[pos++] = (*p == '\\') ? '/' : (char)tolower((unsigned char)*p);
+  }
+  lock_name[pos] = '\0';
+
+  mutex = CreateMutexA(NULL, FALSE, lock_name);
+  ok = (mutex != NULL && GetLastError() != ERROR_ALREADY_EXISTS);
+  if (ok) {
+    *h_lock = (void *)mutex;
+  } else {
+    DWORD error = (mutex != NULL || GetLastError() == ERROR_ACCESS_DENIED) ? ERROR_ALREADY_EXISTS
+                                                                         : GetLastError();
+    if (mutex != NULL) {
+      CloseHandle(mutex); /* another server's mutex */
+    }
+    SetLastError(error);
+  }
+
+  return ok;
+}
+
+/**
+ * @brief Read the user account a process runs as.
+ *
+ * @param[in]  process  Process handle (needs @c PROCESS_QUERY_LIMITED_INFORMATION).
+ * @param[out] buf      Storage for the token information.
+ * @param[out] sid      Points into @p buf on success.
+ *
+ * @return @c true on success.
+ */
+static bool win_process_user(HANDLE process, win_token_user_union_t *buf, PSID *sid) {
+  HANDLE token = NULL;
+  DWORD len = 0;
+  bool ok = (OpenProcessToken(process, TOKEN_QUERY, &token) != FALSE);
+
+  if (ok) {
+    ok = (GetTokenInformation(token, TokenUser, buf, (DWORD)sizeof(*buf), &len) != FALSE);
+    CloseHandle(token);
+  }
+  if (ok) {
+    *sid = buf->user.User.Sid;
+  }
+
+  return ok;
+}
+
+/**
+ * @brief Security attributes that give only this user (and SYSTEM) access.
+ *
+ * @param[out] sa  Filled in; free @c sa->lpSecurityDescriptor with @c LocalFree().
+ *
+ * @return @c true on success.
+ */
+static bool win_owner_only_security(SECURITY_ATTRIBUTES *sa) {
+  win_token_user_union_t user;
+  PSID sid = NULL;
+  LPSTR sid_text = NULL;
+  char sddl[PIPE_SDDL_MAX];
+  bool ok = win_process_user(GetCurrentProcess(), &user, &sid) &&
+            ConvertSidToStringSidA(sid, &sid_text);
+
+  if (ok) {
+    /* Protected DACL: full access for this user and SYSTEM, nobody else. */
+    int n = cli_snprintf(sddl, sizeof(sddl), "D:P(A;;GA;;;%s)(A;;GA;;;SY)", sid_text);
+    ok = (n > 0 && (size_t)n < sizeof(sddl));
+    LocalFree(sid_text);
+  }
+  if (ok) {
+    sa->nLength = (DWORD)sizeof(*sa);
+    sa->bInheritHandle = FALSE;
+    sa->lpSecurityDescriptor = NULL;
+    ok = (ConvertStringSecurityDescriptorToSecurityDescriptorA(
+              sddl, SDDL_REVISION_1, &sa->lpSecurityDescriptor, NULL) != FALSE);
+  }
+
+  return ok;
+}
+
+/**
+ * @brief Check that the server end of @p pipe runs as this user.
+ *
+ * @param[in] pipe  Connected client handle.
+ *
+ * @return @c true if the server process's user is ours; @c false otherwise or when it
+ *         cannot be determined.
+ */
+static bool win_pipe_server_is_self(HANDLE pipe) {
+  ULONG pid = 0;
+  bool same = false;
+
+  if (GetNamedPipeServerProcessId(pipe, &pid)) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (process != NULL) {
+      win_token_user_union_t theirs;
+      win_token_user_union_t mine;
+      PSID their_sid = NULL;
+      PSID my_sid = NULL;
+
+      same = win_process_user(process, &theirs, &their_sid) &&
+             win_process_user(GetCurrentProcess(), &mine, &my_sid) &&
+             EqualSid(their_sid, my_sid);
+      CloseHandle(process);
+    }
+  }
+
+  return same;
 }
 
 /**
@@ -519,38 +746,59 @@ static bool build_fifo_paths(const char *name, char *in_path, char *out_path, si
 }
 
 /**
- * @brief Test whether another server is listening on @p in_path.
+ * @brief Reserve @p name for this server: an exclusive lock on "<name>.lock".
  *
- * A listening server holds the FIFO open for reading, so a non-blocking open for
- * writing succeeds. A FIFO left behind by a server that is gone has no reader
- * (@c ENXIO) and may be replaced.
+ * Held until @c cli_pipe_close(), so only one server uses the name and FIFOs found on
+ * disk while holding it are leftovers. The lock file stays on disk (removing it would
+ * let two servers lock different files of the same name).
  *
- * @param[in] in_path  Client-to-server FIFO path.
+ * @param[in]  name     Base path.
+ * @param[out] buf      Scratch buffer for the lock file path.
+ * @param[in]  size     Size of @p buf.
+ * @param[out] lock_fd  Receives the descriptor that holds the lock.
  *
- * @return @c true (with @c errno = @c EADDRINUSE) if a server reads it.
+ * @return @c true on success; @c false with @c errno = @c EADDRINUSE when another server
+ *         holds it, or the cause of the failure.
  */
-static bool fifo_in_use(const char *in_path) {
-  struct stat st;
-  bool in_use = false;
+static bool fifo_reserve_name(const char *name, char *buf, size_t size, int32_t *lock_fd) {
+  int n = cli_snprintf(buf, size, "%s.lock", name);
+  int32_t fd = -1;
+  bool ok = (n >= 0 && (size_t)n < size);
 
-  if (lstat(in_path, &st) == 0 && S_ISFIFO(st.st_mode)) {
-    int32_t probe = open(in_path, O_WRONLY | O_NONBLOCK);
-    if (probe >= 0) {
-      close(probe);
-      errno = EADDRINUSE;
-      in_use = true;
+  if (!ok) {
+    errno = ENAMETOOLONG;
+  } else {
+    fd = open(buf, O_RDWR | O_CREAT, 0600);
+    ok = (fd >= 0);
+  }
+  if (ok) {
+    struct flock fl;
+
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = F_WRLCK; /* whole file */
+    fl.l_whence = SEEK_SET;
+    if (fcntl(fd, F_SETLK, &fl) != 0) {
+      int saved = errno;
+      close(fd);
+      errno = (saved == EACCES || saved == EAGAIN) ? EADDRINUSE : saved;
+      ok = false;
     }
   }
-  return in_use;
+  if (ok) {
+    *lock_fd = fd;
+  }
+
+  return ok;
 }
 
 /**
  * @brief Create the FIFO @p path, owner-only, replacing a FIFO left behind.
  *
- * A new FIFO per session means nothing still attached to an old one (a client
- * that has not exited yet) can take part in the new session. Mode 0600: other
- * users can neither type into the CLI nor read its output. A path that exists
- * but is not a FIFO is never removed.
+ * Called with the name reserved, so an existing FIFO belongs to no running server. A
+ * new FIFO per session means nothing still attached to an old one (a client that has
+ * not exited yet) can take part in the new session. Mode 0600: other users can neither
+ * type into the CLI nor read its output. A path that exists but is not a FIFO is never
+ * removed.
  *
  * @param[in] path  FIFO path.
  *
@@ -569,6 +817,69 @@ static bool fifo_create(const char *path) {
   }
 
   return ok;
+}
+
+/**
+ * @brief Check that @p fd is a FIFO of this user that nobody else can open.
+ *
+ * @param[in] fd  Open descriptor.
+ *
+ * @return @c true for a FIFO owned by the effective user with no group / other access.
+ */
+static bool fifo_is_private(int32_t fd) {
+  struct stat st;
+
+  return (fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode) && st.st_uid == geteuid() &&
+          (st.st_mode & (S_IRWXG | S_IRWXO)) == 0);
+}
+
+/**
+ * @brief Wait until the session has started: the server's first output (banner or
+ *        prompt) arrives on @p rfd.
+ *
+ * Both FIFOs were opened without blocking, so whether a server is at the other end is
+ * only known once it writes. A server that went away closes its read end of
+ * <name>.in, which shows as an error on @p wfd.
+ *
+ * @param[in] rfd       Client end of <name>.out (non-blocking).
+ * @param[in] wfd       Client end of <name>.in.
+ * @param[in] deadline  @c monotonic_ms() value to give up at.
+ *
+ * @return @c true once output is readable; @c false with @c errno = @c ETIMEDOUT or
+ *         @c ECONNREFUSED.
+ */
+static bool fifo_wait_connected(int32_t rfd, int32_t wfd, uint64_t deadline) {
+  bool connected = false;
+  bool waiting = true;
+
+  while (waiting) {
+    struct pollfd pfd[2];
+    uint64_t now = monotonic_ms();
+    int ready;
+
+    pfd[0].fd = rfd;
+    pfd[0].events = POLLIN;
+    pfd[0].revents = 0;
+    pfd[1].fd = wfd;
+    pfd[1].events = 0; /* errors only */
+    pfd[1].revents = 0;
+    ready = (now < deadline) ? poll(pfd, 2, (int)(deadline - now)) : 0;
+
+    if (ready < 0 && errno == EINTR) {
+      /* Interrupted: wait for the rest of the time. */
+    } else if (ready > 0 && (pfd[0].revents & POLLIN) != 0) {
+      connected = true;
+      waiting = false;
+    } else if (ready > 0) {
+      errno = ECONNREFUSED; /* the server closed its ends without a word */
+      waiting = false;
+    } else {
+      errno = (ready == 0) ? ETIMEDOUT : errno;
+      waiting = false;
+    }
+  }
+
+  return connected;
 }
 
 /**

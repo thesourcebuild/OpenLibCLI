@@ -28,6 +28,7 @@
 #endif
 #include <windows.h>
 #else
+#include <signal.h>
 #include <sys/time.h>
 #endif
 
@@ -101,6 +102,12 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Invalid port '%s' (expected 1..65535)\n", argv[1]);
     return 1;
   }
+
+#if !ENV_IS_WINDOWS
+  /* A client that disconnects while output is being sent must end its session (EPIPE),
+   * not kill the server. */
+  signal(SIGPIPE, SIG_IGN);
+#endif
 
   int32_t listen_fd = cli_telnet_listen(port);
   if (listen_fd < 0) {

@@ -214,8 +214,10 @@ static void on_stop_signal(int sig) {
 
   (void)sig;
   s_stop = 1;
-  if (s_stop_pipe[1] >= 0) {
-    (void)write(s_stop_pipe[1], "", 1); /* async-signal-safe; non-blocking end */
+  /* write() is async-signal-safe and the end is non-blocking. It fails only when the pipe
+   * is full, i.e. a wake-up is already pending, which is all that is needed. */
+  if (s_stop_pipe[1] >= 0 && write(s_stop_pipe[1], "", 1) < 0) {
+    /* Nothing to do: see above. */
   }
   errno = saved_errno;
 }
@@ -320,23 +322,22 @@ static void setup_session(cli_struct_t *cli, uint32_t session_id) {
  */
 static int run_server(const char *path) {
   int status = 0;
-  int32_t srv_fd = CLI_UNIX_SOCK_ERR;
+  cli_unix_listener_struct_t listener = {CLI_UNIX_SOCK_ERR, CLI_UNIX_SOCK_ERR};
 
   signal(SIGPIPE, SIG_IGN);
 
   if (!stop_signals_install()) {
     perror("stop signal setup");
     status = 1;
+  } else if (cli_unix_listen(path, &listener) != CLI_UNIX_SOCK_OK) {
+    perror("cli_unix_listen");
+    fprintf(stderr, "Failed to create socket at '%s'\n", path);
+    status = 1;
   } else {
-    srv_fd = cli_unix_listen(path);
-    if (srv_fd < 0) {
-      perror("cli_unix_listen");
-      fprintf(stderr, "Failed to create socket at '%s'\n", path);
-      status = 1;
-    }
+    /* Listening. */
   }
 
-  if (srv_fd >= 0) {
+  if (listener.fd >= 0) {
     printf("OpenLibCLI UNIX socket server listening.\n");
     printf("  Socket : %s\n\n", path);
     printf("Connect with:\n");
@@ -351,16 +352,22 @@ static int run_server(const char *path) {
       fflush(stdout);
 
       /* Wait for a client or a stop request; only then block in accept(). */
-      if (wait_readable_or_stop(srv_fd, -1) == 0) {
+      if (wait_readable_or_stop(listener.fd, -1) == 0) {
         continue; /* stop requested (or poll interrupted): re-check s_stop */
       }
 
-      int32_t conn_fd = cli_unix_accept(srv_fd);
+      int32_t conn_fd = cli_unix_accept(listener.fd);
       if (conn_fd < 0) {
         if (errno != EINTR) {
           perror("cli_unix_accept");
           cli_sleep_ms(100U); /* back off on persistent errors (e.g. EMFILE) */
         }
+        continue;
+      }
+      if (!cli_unix_peer_is_self(conn_fd)) {
+        /* The 0600 socket should keep other users out; do not rely on it alone. */
+        fprintf(stderr, "Refused a connection from another user\n");
+        cli_unix_close(conn_fd);
         continue;
       }
 
@@ -381,8 +388,7 @@ static int run_server(const char *path) {
       cli_unix_close(conn_fd);
     }
 
-    cli_unix_close(srv_fd);
-    cli_unix_unlink(path);
+    cli_unix_listener_close(&listener, path);
     printf("Server stopped; removed %s\n", path);
   }
 

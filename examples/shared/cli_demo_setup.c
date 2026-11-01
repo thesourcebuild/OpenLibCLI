@@ -26,6 +26,7 @@
 #include <time.h>
 #endif
 
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -52,6 +53,7 @@
  *=======================================================================================*/
 
 static int8_t demo_periodic_cb(cli_struct_t *cli);
+static int8_t demo_enter_mode(cli_struct_t *cli, cli_mode_t mode);
 
 /*=======================================================================================
  * External Data Variables
@@ -147,8 +149,8 @@ int8_t cmd_show_counters(cli_struct_t *cli, const char *cmd, cli_argc_t argc, co
   (void)cmd;
   (void)argc;
   (void)argv;
-  cli_println(cli, "RX packets : %u", app->rx_packets);
-  cli_println(cli, "TX packets : %u", app->tx_packets);
+  cli_println(cli, "RX packets : %" PRIu32, app->rx_packets);
+  cli_println(cli, "TX packets : %" PRIu32, app->tx_packets);
   return CLI_OK;
 }
 
@@ -209,8 +211,10 @@ int8_t cmd_hostname(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const c
   (void)cmd;
   int8_t rc = CLI_ERR;
 
-  if (argc < 2) {
+  if (argc != 2) {
     cli_println(cli, "Usage: hostname <name>");
+  } else if (strlen(argv[1]) >= (size_t)CLI_MAX_PROMPT_LEN) {
+    cli_error(cli, "Hostname too long (at most %d characters).", CLI_MAX_PROMPT_LEN - 1);
   } else {
     cli_set_hostname(cli, argv[1]);
     cli_println(cli, "Hostname set to: %s", argv[1]);
@@ -228,16 +232,14 @@ int8_t cmd_calculator(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const
   cli_set_mode_name(cli, APP_MODE_CALCULATOR, "");
   cli_set_mode_name(cli, APP_MODE_ARITHMETIC, "");
 #endif
-  cli_set_mode(cli, APP_MODE_CALCULATOR);
-  return CLI_OK;
+  return demo_enter_mode(cli, APP_MODE_CALCULATOR);
 }
 
 int8_t cmd_arithmetic(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
   (void)cmd;
   (void)argc;
   (void)argv;
-  cli_set_mode(cli, APP_MODE_ARITHMETIC);
-  return CLI_OK;
+  return demo_enter_mode(cli, APP_MODE_ARITHMETIC);
 }
 
 int8_t cmd_add(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
@@ -297,6 +299,24 @@ void cli_sleep_ms(uint32_t ms) {
 /*=======================================================================================
  * Private Functions
  *=======================================================================================*/
+
+/**
+ * @brief Switch to a menu mode; the command fails (and its submenu is not entered) when
+ *        the navigation depth limit is reached.
+ *
+ * @param[in] cli   Active CLI session.
+ * @param[in] mode  Mode to enter.
+ *
+ * @return Result of @c cli_set_mode().
+ */
+static int8_t demo_enter_mode(cli_struct_t *cli, cli_mode_t mode) {
+  int8_t rc = cli_set_mode(cli, mode);
+
+  if (rc != CLI_OK) {
+    cli_error(cli, "Navigation depth limit reached.");
+  }
+  return rc;
+}
 
 static int8_t demo_periodic_cb(cli_struct_t *cli) {
   demo_app_data_struct_t *app = (demo_app_data_struct_t *)cli_get_userdata(cli);

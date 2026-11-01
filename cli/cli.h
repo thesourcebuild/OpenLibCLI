@@ -646,6 +646,9 @@ struct cli_cmd_s {
   uint8_t flags;           /**< Bitmask of @c CLI_CMD_FLAG_* values. */
 
 #if CLI_ENABLE_ALIASES
+#if CLI_MAX_ALIASES < 1
+#error "CLI_MAX_ALIASES must be at least 1 when CLI_ENABLE_ALIASES is set"
+#endif
   char aliases[CLI_MAX_ALIASES][CLI_MAX_NAME_LEN]; /**< Inline alias keywords
                                                       no extra tree nodes. */
   cli_len_t num_aliases;                           /**< Number of valid entries in @c aliases[]. */
@@ -1126,10 +1129,12 @@ OPENLIBCLI_API void cli_set_mode_change_cb(cli_struct_t *cli, cli_mode_fn fn);
  *
  * @param[in] cli   Active CLI session.
  * @param[in] mode  Mode value to name (not @c CLI_MODE_ANY).
- * @param[in] name  Display string (e.g. @c "config").
+ * @param[in] name  Display string (e.g. @c "config"), shorter than
+ *                  @c CLI_MAX_MODE_NAME_LEN.
  *
- * @return @c CLI_OK, @c CLI_ERR on invalid arguments, or @c CLI_ERR_NOMEM when
- *         @c CLI_MAX_MODES names are already stored.
+ * @return @c CLI_OK, @c CLI_ERR on invalid arguments or a name that does not fit
+ *         (the previous name is kept), or @c CLI_ERR_NOMEM when @c CLI_MAX_MODES
+ *         names are already stored.
  */
 OPENLIBCLI_API int8_t cli_set_mode_name(cli_struct_t *cli, cli_mode_t mode, const char *name);
 
@@ -1809,12 +1814,17 @@ OPENLIBCLI_API int cli_sscanf(const char *str, const char *fmt, void *out);
  * @brief Register all built-in commands into a CLI instance.
  *
  * Registers @c exit, @c quit, @c enable, @c disable, @c end, @c configure,
- * @c help, @c clear, and (if enabled) @c history into the provided CLI instance.
- * On AVR/Arduino targets only @c exit, @c help, and @c history are registered.
+ * @c help, @c usage (with @c commands and @c keys), @c clear / @c cls (ANSI
+ * terminals; the alias needs @c CLI_ENABLE_ALIASES) and, if enabled, @c history.
+ * They take up to 12 pool entries; the longest name, @c configure, needs
+ * @c CLI_MAX_NAME_LEN of at least 10.
  *
  * @param[in] cli  Pointer to an initialised CLI instance.
+ *
+ * @return @c CLI_OK, or @c CLI_ERR if any of them could not be registered (pool
+ *         full, name too long); the others are registered regardless.
  */
-OPENLIBCLI_API void cli_add_builtin_cmds(cli_struct_t *cli);
+OPENLIBCLI_API int8_t cli_add_builtin_cmds(cli_struct_t *cli);
 
 /**
  * @brief Built-in @c exit command handler.

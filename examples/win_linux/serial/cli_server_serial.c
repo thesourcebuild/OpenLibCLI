@@ -30,6 +30,7 @@
 #include <conio.h>
 #elif ENV_IS_UNIX_LIKE
 #include <poll.h>
+#include <signal.h>
 #include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
@@ -111,6 +112,11 @@ static int8_t cli_server_loop(cli_struct_t *cli);
  * @return @c 0 on clean exit.
  */
 int main(void) {
+#if ENV_IS_UNIX_LIKE
+  /* Output piped into a reader that exits (e.g. '| head') must end the session (EPIPE),
+   * restoring the terminal, not kill the process with the terminal still in raw mode. */
+  signal(SIGPIPE, SIG_IGN);
+#endif
   cli_serial_init(&s_transport);
 
   printf("Starting Serial CLI server (stdin/stdout)\n");

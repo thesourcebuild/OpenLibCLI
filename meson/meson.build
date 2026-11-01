@@ -11,9 +11,16 @@ project(
     default_options : ['warning_level=3', 'c_std=c99'],
 )
 
+# c99 hides POSIX: without it the default time source loses CLOCK_MONOTONIC and falls
+# back to the wall clock.
+if host_machine.system() != 'windows'
+  add_project_arguments('-D_POSIX_C_SOURCE=200809L', language: 'c')
+endif
+
 openlibcli_lib = library(
     meson.project_name(),
     'cli/cli.c',
+    'cli/utils/cli_args_parse.c',
     include_directories : include_directories('cli'),
     install : true,
 )

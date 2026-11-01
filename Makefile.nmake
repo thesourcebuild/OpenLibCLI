@@ -349,7 +349,7 @@ $(PIPE_BIN): $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
     $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
         $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_pipe.map \
-        $(DEMO_OBJ) $(LIB_OUT) $(PLAT_LIBS)
+        $(DEMO_OBJ) $(LIB_OUT) $(PLAT_LIBS) advapi32.lib
 !ELSE
 pipe:
     @echo pipe requires BUILD_EXAMPLE_PIPE=1.

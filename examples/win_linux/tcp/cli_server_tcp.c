@@ -23,6 +23,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#if !ENV_IS_WINDOWS
+#include <signal.h>
+#endif
 
 /*=======================================================================================
  * Private Defines
@@ -90,6 +93,12 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Invalid port '%s' (expected 1..65535)\n", argv[1]);
     return 1;
   }
+
+#if !ENV_IS_WINDOWS
+  /* A client that disconnects while output is being sent must end its session (EPIPE),
+   * not kill the server. */
+  signal(SIGPIPE, SIG_IGN);
+#endif
 
   int32_t listen_fd = cli_tcp_listen(port);
   if (listen_fd < 0) {

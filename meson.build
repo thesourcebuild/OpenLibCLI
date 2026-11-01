@@ -35,9 +35,14 @@ cc = meson.get_compiler('c')
 is_windows = host_machine.system() == 'windows'
 is_linux   = host_machine.system() == 'linux'
 
-# ── POSIX feature test macro (nanosleep / timespec in cli_demo_setup.c) ──
+# ── POSIX feature test macros for c99: POSIX.1-2008 (nanosleep, clock_gettime, lstat,
+#    mkfifo, poll, ...); on macOS also the extensions a POSIX level hides (getpeereid,
+#    SO_NOSIGPIPE) ──
 if not is_windows
-  add_project_arguments('-D_POSIX_C_SOURCE=199309L', language: 'c')
+  add_project_arguments('-D_POSIX_C_SOURCE=200809L', language: 'c')
+endif
+if host_machine.system() == 'darwin'
+  add_project_arguments('-D_DARWIN_C_SOURCE', language: 'c')
 endif
 
 # ── Library (both static + shared) ─────────────────────────────────────────
@@ -115,7 +120,9 @@ if get_option('BUILD_EXAMPLES')
   # Pipe
   if get_option('BUILD_EXAMPLE_PIPE')
     pipe_deps = []
-    if not is_windows
+    if is_windows
+      pipe_deps += cc.find_library('advapi32', required : true)
+    else
       pipe_deps += dependency('threads', required : true)
     endif
     executable('cli_server_pipe',

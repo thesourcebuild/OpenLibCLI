@@ -102,6 +102,16 @@ extern "C" {
 typedef struct {
   int32_t fd; /**< Connected socket file descriptor (@c -1 = closed). */
 } cli_unix_socket_ctx_struct_t;
+
+/**
+ * @brief A listening socket and the lock that gives its server the path.
+ *
+ * Filled by @c cli_unix_listen(), released by @c cli_unix_listener_close().
+ */
+typedef struct {
+  int32_t fd;      /**< Listening socket (@c -1 = closed). */
+  int32_t lock_fd; /**< Descriptor holding the lock on "<path>.lock" (@c -1 = none). */
+} cli_unix_listener_struct_t;
 #endif
 
 /*=======================================================================================
@@ -118,19 +128,31 @@ typedef struct {
 /**
  * @brief Create a listening UNIX domain socket at @p path.
  *
- * A stale socket file left by a crashed server is removed before binding so
- * the server can restart without manual cleanup. A path that is not a socket,
- * or a socket another server is still accepting on, is left untouched and the
- * call fails (@c errno = @c ENOTSOCK / @c EADDRINUSE).
+ * First takes an exclusive lock on "<path>.lock", held until
+ * @c cli_unix_listener_close(): while another server holds it the call fails with
+ * @c errno = @c EADDRINUSE. Holding it, a socket file found at @p path is a leftover
+ * of a crashed server and is replaced, so the server restarts without manual cleanup.
+ * A path that is not a socket is left untouched (@c ENOTSOCK).
  *
  * The socket file is made owner-only (0600) before it accepts connections, so
  * only the user running the server can connect.
  *
- * @param[in] path  Filesystem path for the socket.
+ * @param[in]  path      Filesystem path for the socket.
+ * @param[out] listener  Receives the listening socket and the lock.
  *
- * @return Listening socket fd (>= 0) on success, @c -1 on error.
+ * @return @c CLI_UNIX_SOCK_OK, or @c CLI_UNIX_SOCK_ERR with @c errno set.
  */
-int32_t cli_unix_listen(const char *path);
+int32_t cli_unix_listen(const char *path, cli_unix_listener_struct_t *listener);
+
+/**
+ * @brief Stop listening: close the socket, remove @p path and release the lock.
+ *
+ * Safe to call more than once. The lock file stays on disk.
+ *
+ * @param[in] listener  Listener filled by @c cli_unix_listen().
+ * @param[in] path      Same path passed to @c cli_unix_listen().
+ */
+void cli_unix_listener_close(cli_unix_listener_struct_t *listener, const char *path);
 
 /**
  * @brief Block until one client connects to @p listen_fd.
@@ -159,7 +181,9 @@ int32_t cli_unix_connect(const char *path);
  *
  * A client should call this before sending credentials: in a shared directory
  * such as @c /tmp another user may have created a socket at the expected path.
- * Uses @c SO_PEERCRED (Linux) or @c getpeereid() (BSD, macOS).
+ * Uses @c SO_PEERCRED (Linux) or @c getpeereid() (BSD, macOS). The server uses it
+ * as well, to refuse connections of other users should the socket's file mode
+ * not be enforced.
  *
  * @param[in] fd  Connected socket fd.
  *
@@ -187,12 +211,6 @@ void cli_unix_socket_init(cli_unix_socket_ctx_struct_t *ctx, cli_transport_struc
  */
 void cli_unix_close(int32_t fd);
 
-/**
- * @brief Remove the socket path from the filesystem.
- *
- * @param[in] path  Path previously passed to @c cli_unix_listen().
- */
-void cli_unix_unlink(const char *path);
 #endif
 
 /** @} */

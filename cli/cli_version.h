@@ -77,7 +77,7 @@ extern "C" {
 #define CLI_VERSION_XSTR(v) CLI_VERSION_STR(v)
 
 /**
- * @brief Human-readable version string, for example @c "75965d8-dirty".
+ * @brief Human-readable version string, for example @c "ab36da2-dirty".
  *
  * Built from the individual numeric components via the stringify helpers.
  */

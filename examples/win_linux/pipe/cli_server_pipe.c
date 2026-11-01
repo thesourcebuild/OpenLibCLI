@@ -30,22 +30,21 @@
  *
  * A background thread plays the "client" role.  No external tool is needed.
  *
- * **Build Linux / macOS**
+ * **Build Linux / macOS** (from the repository root)
  * @code
- *   gcc -std=c99 -Wall -Wextra -I../include                    \
- *       ../../../cli/cli.c                                           \
- *       ../telnet/cli_transport_telnet.c ../tcp/cli_transport_tcp.c       \
- *       cli_transport_pipe.c                                    \
- *       cli_server_pipe.c -lpthread -o cli_server_pipe
+ *   gcc -std=c99 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Icli          \
+ *       cli/cli.c cli/utils/cli_args_parse.c examples/shared/cli_demo_setup.c \
+ *       examples/win_linux/pipe/cli_transport_pipe.c                     \
+ *       examples/win_linux/pipe/cli_server_pipe.c -lpthread -o cli_server_pipe
  * @endcode
+ * (macOS: add @c -D_DARWIN_C_SOURCE.)
  *
- * **Build Windows (MinGW)**
+ * **Build Windows (MinGW)** (from the repository root)
  * @code
- *   gcc -std=c99 -Wall -I../include                            \
- *       ../../../cli/cli.c                                           \
- *       ../telnet/cli_transport_telnet.c ../tcp/cli_transport_tcp.c       \
- *       cli_transport_pipe.c                                    \
- *       cli_server_pipe.c -o cli_server_pipe.exe
+ *   gcc -std=c99 -Wall -Wextra -Icli                                    \
+ *       cli/cli.c cli/utils/cli_args_parse.c examples/shared/cli_demo_setup.c \
+ *       examples/win_linux/pipe/cli_transport_pipe.c                     \
+ *       examples/win_linux/pipe/cli_server_pipe.c -ladvapi32 -o cli_server_pipe.exe
  * @endcode
  *
  * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
@@ -71,10 +70,13 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <fcntl.h>
+#include <io.h>
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
 #define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004 /* missing from older SDK headers */
 #endif
 #else
+#include <errno.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -143,7 +145,7 @@ static demo_app_data_struct_t s_app;
 
 static void register_commands(cli_struct_t *cli);
 static int run_named_server(const char *name);
-static void run_named_client(const char *name);
+static int run_named_client(const char *name);
 static void run_anon_demo(void);
 static void print_usage(const char *prog);
 static int8_t cli_server_loop(cli_struct_t *cli);
@@ -161,8 +163,8 @@ static int8_t cli_server_loop(cli_struct_t *cli);
  * @param[in] argc Number of command-line arguments.
  * @param[in] argv Command-line arguments.
  *
- * @return @c 0 on normal flow, or @c 1 when an invalid mode is provided or the
- *         named pipe cannot be created.
+ * @return @c 0 on normal flow, or @c 1 when an invalid mode is provided, the
+ *         named pipe cannot be created, or the client cannot connect.
  */
 int main(int argc, char *argv[]) {
   const char *mode = (argc > 1) ? argv[1] : "named";
@@ -177,7 +179,7 @@ int main(int argc, char *argv[]) {
   if (strcmp(mode, "named") == 0) {
     status = run_named_server(name);
   } else if (strcmp(mode, "client") == 0) {
-    run_named_client(name);
+    status = run_named_client(name);
   } else if (strcmp(mode, "anon") == 0) {
     run_anon_demo();
   } else if (strcmp(mode, "help") == 0 || strcmp(mode, "--help") == 0) {
@@ -378,19 +380,25 @@ static int run_named_server(const char *name) {
 
   uint32_t session_num = 0;
   bool listening = true;
+  /* One context for every session: the first listen reserves the name for this server. */
+  cli_pipe_ctx_struct_t pipe_ctx = CLI_PIPE_CTX_INIT;
 
   while (listening) {
     printf("Waiting for client connection ...\n");
     fflush(stdout);
 
-    cli_pipe_ctx_struct_t pipe_ctx = {0};
     cli_transport_struct_t transport;
 
     if (cli_named_pipe_listen(name, &pipe_ctx) < 0) {
-      /* Creating / opening the pipe failed (bad path, permissions, ...): retrying the
-       * same call cannot succeed. */
+      /* Creating / opening the pipe failed (another server, bad path, permissions, ...):
+       * retrying the same call cannot succeed. */
 #if ENV_IS_WINDOWS
-      fprintf(stderr, "cli_named_pipe_listen failed (error %lu)\n", GetLastError());
+      DWORD error = GetLastError();
+      if (error == ERROR_ALREADY_EXISTS) {
+        fprintf(stderr, "cli_named_pipe_listen: another server uses this name\n");
+      } else {
+        fprintf(stderr, "cli_named_pipe_listen failed (error %lu)\n", error);
+      }
 #else
       perror("cli_named_pipe_listen");
 #endif
@@ -412,6 +420,7 @@ static int run_named_server(const char *name) {
     }
   }
 
+  cli_pipe_close(&pipe_ctx); /* releases the name */
   return 1;
 }
 
@@ -452,6 +461,15 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
   DWORD old_out_mode = 0;
   BOOL out_vt = GetConsoleMode(h_stdout, &old_out_mode) &&
                 SetConsoleMode(h_stdout, old_out_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+
+  /* The CLI already sends CR LF: binary mode passes it through instead of turning the LF
+   * into another CR LF. */
+  fflush(stdout);
+  int old_stdout_mode = _setmode(_fileno(stdout), _O_BINARY);
+
+  /* Redirected input from a pipe is read only when data is there, so the server's output
+   * keeps appearing while the producer is still running. A file never blocks. */
+  bool stdin_is_pipe = (!is_con && GetFileType(h_stdin) == FILE_TYPE_PIPE);
 
   uint8_t pipe_buf[512];
   int32_t running = 1;
@@ -545,18 +563,31 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
         }
       }
     } else if (!input_open) {
-      /* Input exhausted: keep showing the server's replies until it closes the session. A
-       * duplex pipe cannot be half-closed to announce the end of input, so that happens on
-       * 'exit' / 'quit' in the input or when the server's idle timeout closes the session. */
+      /* Input exhausted: keep showing the server's replies until it closes the session. */
       cli_sleep_ms(10U);
     } else {
-      char filter_line_buf[512];
-      if (!fgets(filter_line_buf, (int32_t)sizeof(filter_line_buf), stdin)) {
+      DWORD pending = 0;
+      DWORD n_in = 0;
+
+      if (stdin_is_pipe && PeekNamedPipe(h_stdin, NULL, 0, NULL, &pending, NULL) &&
+          pending == 0U) {
+        cli_sleep_ms(10U); /* nothing yet (a closed pipe fails the peek: ReadFile sees EOF) */
+        continue;
+      }
+      if (!ReadFile(h_stdin, pipe_buf, (DWORD)sizeof(pipe_buf), &n_in, NULL) || n_in == 0U) {
         input_open = false;
+        if (h_write != h_read) {
+          /* Separate write end (anonymous pipes): closing it tells the server that the input
+           * has ended, which ends the session after the commands sent so far. A duplex
+           * named pipe cannot be half-closed: there the session ends on 'exit' / 'quit' in
+           * the input or by the server's idle timeout. */
+          CloseHandle(h_write);
+          ctx->h_write = NULL;
+        }
         continue;
       }
       DWORD n = 0;
-      if (!WriteFile(h_write, filter_line_buf, (DWORD)strlen(filter_line_buf), &n, NULL)) {
+      if (!WriteFile(h_write, pipe_buf, n_in, &n, NULL)) {
         running = 0;
       }
     }
@@ -564,6 +595,10 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
 
   if (is_con) {
     SetConsoleMode(h_stdin, old_mode);
+  }
+  if (old_stdout_mode != -1) {
+    fflush(stdout);
+    (void)_setmode(_fileno(stdout), old_stdout_mode);
   }
   if (out_vt) {
     SetConsoleMode(h_stdout, old_out_mode);
@@ -574,14 +609,23 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
  * @brief Connect to the named-pipe server and relay stdin/stdout (Windows).
  *
  * @param[in] name  Logical pipe name.
+ *
+ * @return 0 when the session ran, 1 if no connection was made.
  */
-static void run_named_client(const char *name) {
-  cli_pipe_ctx_struct_t pipe_ctx = {0};
+static int run_named_client(const char *name) {
+  cli_pipe_ctx_struct_t pipe_ctx = CLI_PIPE_CTX_INIT;
+  int status = 0;
+
   printf("Connecting to pipe '%s' ...\n", name);
   fflush(stdout);
 
   if (cli_named_pipe_connect(name, &pipe_ctx) < 0) {
-    fprintf(stderr, "Failed to connect to pipe '%s'\n", name);
+    if (GetLastError() == ERROR_ACCESS_DENIED) {
+      fprintf(stderr, "Refusing pipe '%s': the server is not running as this user\n", name);
+    } else {
+      fprintf(stderr, "Failed to connect to pipe '%s' (error %lu)\n", name, GetLastError());
+    }
+    status = 1;
   } else {
     printf("Connected. Type 'exit' or 'quit' to end the session.\n\n");
     fflush(stdout);
@@ -590,6 +634,8 @@ static void run_named_client(const char *name) {
     cli_pipe_close(&pipe_ctx);
     printf("\nSession closed.\n");
   }
+
+  return status;
 }
 
 #else /* POSIX relay two independent fds, two pthreads */
@@ -673,15 +719,25 @@ static PFT_THREAD_FN relay_writer_fn(PFT_THREAD_ARG arg) {
  * @brief Connect to the named-pipe server and relay stdin/stdout (POSIX).
  *
  * @param[in] name  Logical pipe base path.
+ *
+ * @return 0 when the session ran, 1 if no connection was made.
  */
-static void run_named_client(const char *name) {
-  cli_pipe_ctx_struct_t pipe_ctx = {0};
+static int run_named_client(const char *name) {
+  cli_pipe_ctx_struct_t pipe_ctx = CLI_PIPE_CTX_INIT;
+  int status = 0;
+
   printf("Connecting to pipe '%s' ...\n", name);
   fflush(stdout);
 
   if (cli_named_pipe_connect(name, &pipe_ctx) < 0) {
-    fprintf(stderr, "Failed to connect to pipe '%s'\n", name);
-    fprintf(stderr, "  (Make sure the server has created %s.in and %s.out)\n", name, name);
+    if (errno == EPERM) {
+      fprintf(stderr, "Refusing '%s.in' / '%s.out': not this user's private FIFOs\n", name,
+              name);
+    } else {
+      perror("cli_named_pipe_connect");
+      fprintf(stderr, "Failed to connect to pipe '%s' (is the server running?)\n", name);
+    }
+    status = 1;
   } else {
     printf("Connected. Type 'exit' or 'quit' to end the session.\n\n");
     fflush(stdout);
@@ -708,6 +764,8 @@ static void run_named_client(const char *name) {
     cli_pipe_close(&pipe_ctx);
     printf("\nSession closed.\n");
   }
+
+  return status;
 }
 
 #endif /* POSIX relay */
@@ -750,7 +808,7 @@ static PFT_THREAD_FN anon_server_fn(PFT_THREAD_ARG arg) {
  * reads input from stdin in the main thread.
  */
 static void run_anon_demo(void) {
-  cli_pipe_ctx_struct_t srv = {0}, clt = {0};
+  cli_pipe_ctx_struct_t srv = CLI_PIPE_CTX_INIT, clt = CLI_PIPE_CTX_INIT;
   cli_transport_struct_t srv_tp;
 
   printf("Anonymous pipe demo INTERACTIVE session\n");
