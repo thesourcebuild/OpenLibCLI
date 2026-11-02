@@ -26,7 +26,9 @@ try {
     # Replace @CLI_VERSION@ placeholder in the template
     $content = Get-Content $template -Raw
     $content = $content -replace '@CLI_VERSION@', $version
-    Set-Content -Path $wrapFile -Value $content -Encoding UTF8
+    # UTF-8 without a byte-order mark: Windows PowerShell's "-Encoding UTF8" writes one, and
+    # Meson then cannot parse the wrap file ("File contains no section headers").
+    [System.IO.File]::WriteAllText($wrapFile, $content, (New-Object System.Text.UTF8Encoding $false))
 
     Write-Host "Generated: $wrapFile"
     Write-Host ""

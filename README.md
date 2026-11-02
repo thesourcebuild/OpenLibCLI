@@ -253,7 +253,7 @@ See the [`examples-embedded/`](examples-embedded) directory for microcontrollers
 
 ## Building
 
-See [`Docs/how_to_build.md`](Docs/how_to_build.md) for the full build guide covering all toolchains, compile-time tuning, and output layouts.
+See [`Docs/How_to_build.md`](Docs/How_to_build.md) for the full build guide covering all toolchains, compile-time tuning, and output layouts.
 
 ### Windows — automatic (recommended)
 
@@ -354,7 +354,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 # Common targets (depend on enabled options):
 #   cli_static, cli_shared, cli_server_telnet, cli_server_tcp, cli_server_serial
-# Output libraries: static + shared under `build/<platform>/libs/`
+# Output: shared library (static too with -DBUILD_LIB_STATIC=ON) under `build/<platform>/libs/`
 ```
 
 ---

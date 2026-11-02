@@ -10,7 +10,8 @@
 #
 #  Targets
 #  -------
-#  all            Build static + shared libraries and host examples [default]
+#  all            Build the shared library and host examples [default]
+#                 (BUILD_LIB_STATIC=1 adds the static library)
 #  lib            Build static library only
 #  shared         Build shared library only
 #  cli_server_telnet  Build the telnet server example
@@ -65,6 +66,19 @@ else
     RM    ?= rm -f
     RMDIR ?= rm -rf
     COPY   = cp -f
+endif
+
+# $(call say,text): print one line of text exactly (empty: a blank line). cmd.exe echoes
+# quotes literally and treats | < > & ^ as operators, which are escaped with ^; "echo."
+# prints an empty line (both are commands make runs through cmd.exe).
+# $(call mkdir_p,dir): create a directory and its parents if missing; succeeds whenever the
+# directory exists afterwards (a parallel job may have created it first).
+ifeq ($(CMD_SHELL),1)
+    say     = $(if $(1),echo $(subst >,^>,$(subst <,^<,$(subst |,^|,$(subst &,^&,$(subst ^,^^,$(1)))))),echo.)
+    mkdir_p = (if not exist "$(subst /,\,$(1))" mkdir "$(subst /,\,$(1))") 2>nul & if exist "$(subst /,\,$(1))" (exit /b 0) else exit /b 1
+else
+    say     = printf '%s\n' '$(1)'
+    mkdir_p = mkdir -p $(1)
 endif
 
 # ---------------------------------------------------------------------------
@@ -273,10 +287,21 @@ EXAMPLE_CFLAGS := $(CFLAGS) $(EXAMPLE_LIB_DEFS)
 # ---------------------------------------------------------------------------
 LIB_SRCS := $(SRC_DIR)/cli.c $(SRC_DIR)/utils/cli_args_parse.c
 
-LIB_OBJS      := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(LIB_SRCS))
-EMBED_LIB_OBJS := $(patsubst $(SRC_DIR)/%.c,$(EMBED_OBJ_DIR)/%.o,$(LIB_SRCS))
-DEMO_SHARED_SRC := $(EXAMPLE_DIR)/shared/cli_demo_setup.c
-DEMO_SHARED_HDR := $(EXAMPLE_DIR)/shared/cli_demo_setup.h
+LIB_OBJS        := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(LIB_SRCS))
+LIB_SHARED_OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/shared/%.o,$(LIB_SRCS))
+EMBED_LIB_OBJS  := $(patsubst $(SRC_DIR)/%.c,$(EMBED_OBJ_DIR)/%.o,$(LIB_SRCS))
+
+# Example objects. Compiled for the library they link (CLI_SHARED or not), so each link
+# mode has its own directory: switching BUILD_LIB_SHARED never mixes the two.
+EX_OBJ_DIR := $(OBJ_DIR)/examples-$(if $(filter 1,$(BUILD_LIB_SHARED)),shared,static)
+ex_objs     = $(patsubst $(EXAMPLE_DIR)/%.c,$(EX_OBJ_DIR)/%.o,$(1))
+DEMO_OBJ        := $(call ex_objs,$(EXAMPLE_DIR)/shared/cli_demo_setup.c)
+TELNET_OBJS     := $(call ex_objs,$(addprefix $(EXAMPLE_DIR)/win_linux/telnet/,cli_server_telnet.c cli_transport_telnet.c)) $(DEMO_OBJ)
+TCP_OBJS        := $(call ex_objs,$(addprefix $(EXAMPLE_DIR)/win_linux/tcp/,cli_server_tcp.c cli_transport_tcp.c)) $(DEMO_OBJ)
+SERIAL_OBJS     := $(call ex_objs,$(addprefix $(EXAMPLE_DIR)/win_linux/serial/,cli_server_serial.c cli_transport_serial.c)) $(DEMO_OBJ)
+PIPE_OBJS       := $(call ex_objs,$(addprefix $(EXAMPLE_DIR)/win_linux/pipe/,cli_server_pipe.c cli_transport_pipe.c)) $(DEMO_OBJ)
+UNIX_SOCK_OBJS  := $(call ex_objs,$(addprefix $(EXAMPLE_DIR)/linux/unix_socket/,cli_server_unix_socket.c cli_transport_unix_socket.c)) $(DEMO_OBJ)
+EX_OBJS         := $(sort $(TELNET_OBJS) $(TCP_OBJS) $(SERIAL_OBJS) $(PIPE_OBJS) $(UNIX_SOCK_OBJS))
 
 ALL_HOST_TARGETS :=
 ifeq ($(BUILD_LIB_STATIC),1)
@@ -313,59 +338,59 @@ endif
 # ---------------------------------------------------------------------------
 .PHONY: all
 all: $(ALL_HOST_TARGETS)
-	@echo ""
-	@echo "Build complete  [PLATFORM=$(PLATFORM)  CC=$(CC)]"
-	@echo "  Output dir    : $(BUILD_DIR)/"
-	@echo "  Binaries      : $(BIN_DIR)/"
-	@echo "  Libraries     : $(LIB_DIR)/"
-	@echo "  Objects       : $(OBJ_DIR)/"
+	@$(call say,)
+	@$(call say,Build complete  [PLATFORM=$(PLATFORM)  CC=$(CC)])
+	@$(call say,  Output dir    : $(BUILD_DIR)/)
+	@$(call say,  Binaries      : $(BIN_DIR)/)
+	@$(call say,  Libraries     : $(LIB_DIR)/)
+	@$(call say,  Objects       : $(OBJ_DIR)/)
 ifneq ($(BUILD_ASAN),0)
-	@echo "  Sanitizer     : AddressSanitizer"
+	@$(call say,  Sanitizer     : AddressSanitizer)
 endif
-	@echo "  Map files     : $(BUILD_DIR)/"
+	@$(call say,  Map files     : $(BUILD_DIR)/)
 ifeq ($(BUILD_LIB_SHARED),1)
-	@echo "  Shared lib    : $(LIB_OUT)"
+	@$(call say,  Shared lib    : $(LIB_OUT))
 ifneq ($(strip $(SHARED_IMPLIB_OUT)),)
-	@echo "  Import lib    : $(SHARED_IMPLIB_OUT)"
+	@$(call say,  Import lib    : $(SHARED_IMPLIB_OUT))
 endif
 endif
 ifeq ($(BUILD_LIB_STATIC),1)
-	@echo "  Static lib    : $(STATIC_LIB_OUT)"
+	@$(call say,  Static lib    : $(STATIC_LIB_OUT))
 endif
 ifeq ($(BUILD_EXAMPLE_TELNET),1)
-	@echo "  Telnet server : $(TELNET_BIN)"
+	@$(call say,  Telnet server : $(TELNET_BIN))
 endif
 ifeq ($(BUILD_EXAMPLE_TCP),1)
-	@echo "  TCP server    : $(TCP_BIN)"
+	@$(call say,  TCP server    : $(TCP_BIN))
 endif
 ifeq ($(BUILD_EXAMPLE_SERIAL),1)
-	@echo "  Serial server : $(SERIAL_BIN)"
+	@$(call say,  Serial server : $(SERIAL_BIN))
 endif
 ifeq ($(BUILD_EXAMPLE_PIPE),1)
-	@echo "  Pipe server   : $(PIPE_BIN)"
+	@$(call say,  Pipe server   : $(PIPE_BIN))
 endif
 ifeq ($(BUILD_EXAMPLE_UNIX_SOCKET),1)
 ifneq ($(PLATFORM),windows)
-	@echo "  Unix socket   : $(UNIX_SOCK_BIN)"
+	@$(call say,  Unix socket   : $(UNIX_SOCK_BIN))
 endif
 endif
-	@echo ""
-	@echo "Run targets:"
+	@$(call say,)
+	@$(call say,Run targets:)
 ifeq ($(BUILD_EXAMPLE_TELNET),1)
-	@echo "  make run-telnet PORT=$(PORT)"
+	@$(call say,  make run-telnet PORT=$(PORT))
 endif
 ifeq ($(BUILD_EXAMPLE_TCP),1)
-	@echo "  make run-tcp PORT=$(PORT)"
+	@$(call say,  make run-tcp PORT=$(PORT))
 endif
 ifeq ($(BUILD_EXAMPLE_SERIAL),1)
-	@echo "  make run-serial"
+	@$(call say,  make run-serial)
 endif
 ifeq ($(BUILD_EXAMPLE_PIPE),1)
-	@echo "  make run-pipe"
+	@$(call say,  make run-pipe)
 endif
 ifeq ($(BUILD_EXAMPLE_UNIX_SOCKET),1)
 ifneq ($(PLATFORM),windows)
-	@echo "  make run-unix-socket"
+	@$(call say,  make run-unix-socket)
 endif
 endif
 
@@ -383,8 +408,8 @@ $(STATIC_LIB_OUT): $(LIB_OBJS) | $(LIB_DIR)
 .PHONY: shared
 shared: $(SHARED_LIB_OUT) $(SHARED_RUNTIME)
 
-$(SHARED_LIB_OUT): $(LIB_SRCS) | $(LIB_DIR)
-	$(CC) $(SHARED_CFLAGS) $(SHARED_LINK_FLAGS) -o $@ $(LIB_SRCS) $(PLAT_LIBS)
+$(SHARED_LIB_OUT): $(LIB_SHARED_OBJS) | $(LIB_DIR)
+	$(CC) $(SHARED_CFLAGS) $(SHARED_LINK_FLAGS) -o $@ $(LIB_SHARED_OBJS) $(PLAT_LIBS)
 
 # A rule of its own: a copy that failed is made again by the next build.
 $(SHARED_RUNTIME): $(SHARED_LIB_OUT) | $(BIN_DIR)
@@ -395,12 +420,22 @@ else
 endif
 
 # ---------------------------------------------------------------------------
-#  Compile library objects  (host, with auto-dependency tracking)
+#  Compile objects  (host, with auto-dependency tracking: a changed header rebuilds
+#  everything that includes it)
 # ---------------------------------------------------------------------------
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
+$(OBJ_DIR)/shared/%.o: $(SRC_DIR)/%.c
+	@$(call mkdir_p,$(@D))
+	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
+
+$(EX_OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c
+	@$(call mkdir_p,$(@D))
+	$(CC) $(EXAMPLE_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	@$(call mkdir_p,$(@D))
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
--include $(LIB_OBJS:.o=.d)
+-include $(LIB_OBJS:.o=.d) $(LIB_SHARED_OBJS:.o=.d) $(EX_OBJS:.o=.d)
 
 # ---------------------------------------------------------------------------
 #  Example: Telnet server  (host)
@@ -409,11 +444,11 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 ifeq ($(BUILD_EXAMPLE_TELNET),1)
 cli_server_telnet telnet: $(TELNET_BIN)
 
-$(TELNET_BIN): $(EXAMPLE_DIR)/win_linux/telnet/cli_server_telnet.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
-	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/telnet/cli_server_telnet.c $(EXAMPLE_DIR)/win_linux/telnet/cli_transport_telnet.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_telnet.map -o $@
+$(TELNET_BIN): $(TELNET_OBJS) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
+	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(TELNET_OBJS) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_telnet.map -o $@
 else
 cli_server_telnet telnet:
-	@echo "cli_server_telnet requires BUILD_EXAMPLE_TELNET=1."
+	@$(call say,cli_server_telnet requires BUILD_EXAMPLE_TELNET=1.)
 	@exit 1
 endif
 
@@ -424,11 +459,11 @@ endif
 ifeq ($(BUILD_EXAMPLE_TCP),1)
 cli_server_tcp tcp: $(TCP_BIN)
 
-$(TCP_BIN): $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.c $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.h $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
-	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/tcp/cli_server_tcp.c $(EXAMPLE_DIR)/win_linux/tcp/cli_transport_tcp.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_tcp.map -o $@
+$(TCP_BIN): $(TCP_OBJS) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
+	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(TCP_OBJS) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_tcp.map -o $@
 else
 cli_server_tcp tcp:
-	@echo "cli_server_tcp requires BUILD_EXAMPLE_TCP=1."
+	@$(call say,cli_server_tcp requires BUILD_EXAMPLE_TCP=1.)
 	@exit 1
 endif
 
@@ -439,11 +474,11 @@ endif
 ifeq ($(BUILD_EXAMPLE_SERIAL),1)
 cli_server_serial uart: $(SERIAL_BIN)
 
-$(SERIAL_BIN): $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.c $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.h $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
-	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/serial/cli_server_serial.c $(EXAMPLE_DIR)/win_linux/serial/cli_transport_serial.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_serial.map -o $@
+$(SERIAL_BIN): $(SERIAL_OBJS) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
+	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(SERIAL_OBJS) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_serial.map -o $@
 else
 cli_server_serial uart:
-	@echo "cli_server_serial requires BUILD_EXAMPLE_SERIAL=1."
+	@$(call say,cli_server_serial requires BUILD_EXAMPLE_SERIAL=1.)
 	@exit 1
 endif
 
@@ -460,12 +495,12 @@ else
 PIPE_THREAD_LIBS := -lpthread
 endif
 
-$(PIPE_BIN): $(EXAMPLE_DIR)/win_linux/pipe/cli_server_pipe.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
-	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/win_linux/pipe/cli_server_pipe.c $(EXAMPLE_DIR)/win_linux/pipe/cli_transport_pipe.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) $(PIPE_THREAD_LIBS) \
+$(PIPE_BIN): $(PIPE_OBJS) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
+	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(PIPE_OBJS) $(LIB_LINK) $(PLAT_LIBS) $(PIPE_THREAD_LIBS) \
 	    $(MAP_FLAG)$(BUILD_DIR)/cli_server_pipe.map -o $@
 else
 cli_server_pipe pipe:
-	@echo "cli_server_pipe requires BUILD_EXAMPLE_PIPE=1."
+	@$(call say,cli_server_pipe requires BUILD_EXAMPLE_PIPE=1.)
 	@exit 1
 endif
 
@@ -477,19 +512,19 @@ ifneq ($(PLATFORM),windows)
 .PHONY: cli_server_unix_socket unix-socket
 cli_server_unix_socket unix-socket: $(UNIX_SOCK_BIN)
 
-$(UNIX_SOCK_BIN): $(EXAMPLE_DIR)/linux/unix_socket/cli_server_unix_socket.c $(DEMO_SHARED_SRC) $(DEMO_SHARED_HDR) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
-	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(EXAMPLE_DIR)/linux/unix_socket/cli_server_unix_socket.c $(EXAMPLE_DIR)/linux/unix_socket/cli_transport_unix_socket.c $(DEMO_SHARED_SRC) $(LIB_LINK) $(PLAT_LIBS) -lpthread \
+$(UNIX_SOCK_BIN): $(UNIX_SOCK_OBJS) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
+	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(UNIX_SOCK_OBJS) $(LIB_LINK) $(PLAT_LIBS) -lpthread \
 	    $(MAP_FLAG)$(BUILD_DIR)/cli_server_unix_socket.map -o $@
 else
 .PHONY: cli_server_unix_socket unix-socket
 cli_server_unix_socket unix-socket:
-	@echo "cli_server_unix_socket is only available on POSIX platforms."
+	@$(call say,cli_server_unix_socket is only available on POSIX platforms.)
 	@exit 1
 endif
 else
 .PHONY: cli_server_unix_socket unix-socket
 cli_server_unix_socket unix-socket:
-	@echo "cli_server_unix_socket requires BUILD_EXAMPLE_UNIX_SOCKET=1."
+	@$(call say,cli_server_unix_socket requires BUILD_EXAMPLE_UNIX_SOCKET=1.)
 	@exit 1
 endif
 
@@ -507,29 +542,32 @@ embedded-baremetal: lib
 else
 embedded-baremetal: $(EMBED_LIB)
 endif
-	@echo ""
-	@echo "Embedded bare-metal build complete  [CC=$(CC)]"
+	@$(call say,)
+	@$(call say,Embedded bare-metal build complete  [CC=$(CC)])
 ifeq ($(PLATFORM),embedded-baremetal)
-	@echo "  Output dir : $(BUILD_DIR)/"
-	@echo "  Libraries  : $(LIB_DIR)/"
-	@echo "  Objects    : $(OBJ_DIR)/"
-	@echo "  Library    : $(STATIC_LIB_OUT)"
+	@$(call say,  Output dir : $(BUILD_DIR)/)
+	@$(call say,  Libraries  : $(LIB_DIR)/)
+	@$(call say,  Objects    : $(OBJ_DIR)/)
+	@$(call say,  Library    : $(STATIC_LIB_OUT))
 else
-	@echo "  Output dir : $(EMBED_DIR)/"
-	@echo "  Libraries  : $(EMBED_LIB_DIR)/"
-	@echo "  Objects    : $(EMBED_OBJ_DIR)/"
-	@echo "  Library    : $(EMBED_LIB)"
+	@$(call say,  Output dir : $(EMBED_DIR)/)
+	@$(call say,  Libraries  : $(EMBED_LIB_DIR)/)
+	@$(call say,  Objects    : $(EMBED_OBJ_DIR)/)
+	@$(call say,  Library    : $(EMBED_LIB))
 endif
-	@echo ""
-	@echo "  Link this library into your MCU firmware and implement"
-	@echo "  the serial callbacks via cli_serial_init()."
+	@$(call say,)
+	@$(call say,  Link this library into your MCU firmware and implement)
+	@$(call say,  the serial callbacks via cli_serial_init().)
 
 ifneq ($(PLATFORM),embedded-baremetal)
 $(EMBED_LIB): $(EMBED_LIB_OBJS) | $(EMBED_LIB_DIR)
 	$(AR) $(ARFLAGS) $@ $^
 
-$(EMBED_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(EMBED_OBJ_DIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+$(EMBED_OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	@$(call mkdir_p,$(@D))
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(EMBED_LIB_OBJS:.o=.d)
 endif
 
 # ---------------------------------------------------------------------------
@@ -552,7 +590,7 @@ else
 endif
 else
 run-telnet:
-	@echo "run-telnet requires BUILD_EXAMPLE_TELNET=1."
+	@$(call say,run-telnet requires BUILD_EXAMPLE_TELNET=1.)
 	@exit 1
 endif
 
@@ -566,7 +604,7 @@ else
 endif
 else
 run-tcp:
-	@echo "run-tcp requires BUILD_EXAMPLE_TCP=1."
+	@$(call say,run-tcp requires BUILD_EXAMPLE_TCP=1.)
 	@exit 1
 endif
 
@@ -580,7 +618,7 @@ else
 endif
 else
 run-serial:
-	@echo "run-serial requires BUILD_EXAMPLE_SERIAL=1."
+	@$(call say,run-serial requires BUILD_EXAMPLE_SERIAL=1.)
 	@exit 1
 endif
 
@@ -594,7 +632,7 @@ else
 endif
 else
 run-pipe:
-	@echo "run-pipe requires BUILD_EXAMPLE_PIPE=1."
+	@$(call say,run-pipe requires BUILD_EXAMPLE_PIPE=1.)
 	@exit 1
 endif
 
@@ -610,34 +648,22 @@ endif
 else
 .PHONY: run-unix-socket
 run-unix-socket:
-	@echo "run-unix-socket is only available on POSIX platforms."
+	@$(call say,run-unix-socket is only available on POSIX platforms.)
 	@exit 1
 endif
 else
 .PHONY: run-unix-socket
 run-unix-socket:
-	@echo "run-unix-socket requires BUILD_EXAMPLE_UNIX_SOCKET=1."
+	@$(call say,run-unix-socket requires BUILD_EXAMPLE_UNIX_SOCKET=1.)
 	@exit 1
 endif
 
 # ---------------------------------------------------------------------------
 #  Create output directories
 # ---------------------------------------------------------------------------
-$(sort $(BUILD_DIR) $(BIN_DIR) $(LIB_DIR) $(EMBED_DIR)):
-ifeq ($(CMD_SHELL),1)
-	cmd /c if not exist "$(subst /,\,$@)" mkdir "$(subst /,\,$@)"
-else
-	mkdir -p $@
-endif
+$(sort $(BUILD_DIR) $(BIN_DIR) $(LIB_DIR) $(EMBED_DIR) $(EMBED_LIB_DIR)):
+	@$(call mkdir_p,$@)
 
-$(sort $(OBJ_DIR) $(EMBED_OBJ_DIR)):
-ifeq ($(CMD_SHELL),1)
-	cmd /c if not exist "$(subst /,\,$@)" mkdir "$(subst /,\,$@)"
-	cmd /c if not exist "$(subst /,\,$(@)\utils)" if exist "$(subst /,\,$(@))" mkdir "$(subst /,\,$(@)\utils)"
-else
-	mkdir -p $@
-	mkdir -p $@/utils
-endif
 
 # ---------------------------------------------------------------------------
 #  Clean — current platform only
@@ -657,7 +683,7 @@ else
 	$(if $(CLEAN_DIRS),$(RMDIR) $(CLEAN_DIRS))
 	$(if $(CLEAN_FILES),$(RM) $(CLEAN_FILES))
 endif
-	@echo "Cleaned contents of $(BUILD_DIR)/ (folder kept)."
+	@$(call say,Cleaned contents of $(BUILD_DIR)/ (folder kept).)
 
 # ---------------------------------------------------------------------------
 #  Clean — entire build tree
@@ -669,7 +695,7 @@ ifeq ($(CMD_SHELL),1)
 else
 	-$(RMDIR) $(BUILD_BASE)
 endif
-	@echo "Removed $(BUILD_BASE)/."
+	@$(call say,Removed $(BUILD_BASE)/.)
 
 .PHONY: clean-asan
 clean-asan:
@@ -680,61 +706,61 @@ clean-asan:
 # ---------------------------------------------------------------------------
 .PHONY: help
 help:
-	@echo ""
-	@echo "OpenLibCLI Library — GNU Make (GCC / MinGW / Clang)"
-	@echo "======================================================="
-	@echo ""
-	@echo "Output directories:"
-	@echo "  build/gcc/windows/   MinGW / Windows cross-compile"
-	@echo "  build/gcc/linux/     GCC Linux / macOS"
-	@echo "  build/gcc/macos/     Clang macOS"
-	@echo "  build/gcc/embedded-baremetal/  Bare-metal cross-compile"
-	@echo ""
-	@echo "Targets:"
-	@echo "  all            Shared library + examples  [default; add BUILD_LIB_STATIC=1 for static]"
-	@echo "  lib            Static library only"
-	@echo "  shared         Shared library only"
-	@echo "  cli_server_telnet  Telnet server example"
-	@echo "  cli_server_tcp     TCP server example"
-	@echo "  cli_server_serial  Serial server example (host simulation)"
-	@echo "  cli_server_pipe    Named/anonymous pipe server example"
-	@echo "  cli_server_unix_socket  UNIX domain socket server (POSIX only)"
-	@echo "  embedded-baremetal  Cross-compile for bare-metal → build/gcc/embedded-baremetal/"
-	@echo "  asan           Build everything with AddressSanitizer (host only)"
-	@echo ""
-	@echo "Run targets:"
-	@echo "  run-telnet     Build + run telnet server"
-	@echo "  run-tcp        Build + run TCP server"
-	@echo "  run-serial     Build + run Serial demo"
-	@echo "  run-pipe       Build + run pipe demo (anonymous/scripted)"
-	@echo "  run-unix-socket  Build + run UNIX socket server (POSIX only)"
-	@echo "  clean          Remove artefacts for current platform"
-	@echo "  clean-all      Remove entire build/ tree"
-	@echo "  clean-asan     Remove ASAN build artefacts"
-	@echo "  help           Show this message"
-	@echo ""
-	@echo "Variables:"
-	@echo "  PLATFORM=windows|linux|macos|embedded-baremetal  (auto-detected)"
-	@echo "  BUILD_EXAMPLE_TELNET=0|1       Enable Telnet transport and telnet demo"
-	@echo "  BUILD_EXAMPLE_TCP=0|1          Enable TCP transport (tcp demo also requires BUILD_EXAMPLE_TELNET=1)"
-	@echo "  BUILD_EXAMPLE_SERIAL=0|1       Enable generic serial transport and serial demo"
-	@echo "  BUILD_EXAMPLE_PIPE=0|1         Enable pipe transport and pipe demo"
-	@echo "  BUILD_EXAMPLE_UNIX_SOCKET=0|1  Enable UNIX socket transport and POSIX demo"
-	@echo "  BUILD_LIB_STATIC=0|1          Build static library  (default: 0)"
-	@echo "  BUILD_LIB_SHARED=0|1          Build shared library  (default: 1)"
-	@echo "  BUILD_ASAN=0|1               Build with AddressSanitizer  (default: 0)"
-	@echo "  CC=gcc              Host compiler"
-	@echo "  CC                  Compiler (set to cross-compiler for embedded)"
-	@echo "  PORT=2323           Telnet port (run-telnet)"
-	@echo ""
-	@echo "Examples:"
-	@echo "  make"
-	@echo "  make BUILD_EXAMPLE_PIPE=0"
-	@echo "  make run-telnet PORT=9999"
-	@echo "  make CC=clang"
-	@echo "  make asan"
-	@echo "  make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal"
-	@echo "  make CC=x86_64-w64-mingw32-gcc PLATFORM=windows"
-	@echo ""
-	@echo "MSVC / NMake:  nmake /f Makefile.nmake [help]"
-	@echo ""
+	@$(call say,)
+	@$(call say,OpenLibCLI Library - GNU Make (GCC / MinGW / Clang))
+	@$(call say,=======================================================)
+	@$(call say,)
+	@$(call say,Output directories:)
+	@$(call say,  build/gcc/windows/   MinGW / Windows cross-compile)
+	@$(call say,  build/gcc/linux/     GCC Linux / macOS)
+	@$(call say,  build/gcc/macos/     Clang macOS)
+	@$(call say,  build/gcc/embedded-baremetal/  Bare-metal cross-compile)
+	@$(call say,)
+	@$(call say,Targets:)
+	@$(call say,  all            Shared library + examples  [default; add BUILD_LIB_STATIC=1 for static])
+	@$(call say,  lib            Static library only)
+	@$(call say,  shared         Shared library only)
+	@$(call say,  cli_server_telnet  Telnet server example)
+	@$(call say,  cli_server_tcp     TCP server example)
+	@$(call say,  cli_server_serial  Serial server example (host simulation))
+	@$(call say,  cli_server_pipe    Named/anonymous pipe server example)
+	@$(call say,  cli_server_unix_socket  UNIX domain socket server (POSIX only))
+	@$(call say,  embedded-baremetal  Cross-compile for bare-metal -> build/gcc/embedded-baremetal/)
+	@$(call say,  asan           Build everything with AddressSanitizer (host only))
+	@$(call say,)
+	@$(call say,Run targets:)
+	@$(call say,  run-telnet     Build + run telnet server)
+	@$(call say,  run-tcp        Build + run TCP server)
+	@$(call say,  run-serial     Build + run Serial demo)
+	@$(call say,  run-pipe       Build + run pipe demo (anonymous/scripted))
+	@$(call say,  run-unix-socket  Build + run UNIX socket server (POSIX only))
+	@$(call say,  clean          Remove artefacts for current platform)
+	@$(call say,  clean-all      Remove entire build/ tree)
+	@$(call say,  clean-asan     Remove ASAN build artefacts)
+	@$(call say,  help           Show this message)
+	@$(call say,)
+	@$(call say,Variables:)
+	@$(call say,  PLATFORM=windows|linux|macos|embedded-baremetal  (auto-detected))
+	@$(call say,  BUILD_EXAMPLE_TELNET=0|1       Enable Telnet transport and telnet demo)
+	@$(call say,  BUILD_EXAMPLE_TCP=0|1          Enable TCP transport and tcp demo)
+	@$(call say,  BUILD_EXAMPLE_SERIAL=0|1       Enable generic serial transport and serial demo)
+	@$(call say,  BUILD_EXAMPLE_PIPE=0|1         Enable pipe transport and pipe demo)
+	@$(call say,  BUILD_EXAMPLE_UNIX_SOCKET=0|1  Enable UNIX socket transport and POSIX demo)
+	@$(call say,  BUILD_LIB_STATIC=0|1          Build static library  (default: 0))
+	@$(call say,  BUILD_LIB_SHARED=0|1          Build shared library  (default: 1))
+	@$(call say,  BUILD_ASAN=0|1               Build with AddressSanitizer  (default: 0))
+	@$(call say,  CC=gcc              Host compiler)
+	@$(call say,  CC                  Compiler (set to cross-compiler for embedded))
+	@$(call say,  PORT=2323           Telnet port (run-telnet))
+	@$(call say,)
+	@$(call say,Examples:)
+	@$(call say,  make)
+	@$(call say,  make BUILD_EXAMPLE_PIPE=0)
+	@$(call say,  make run-telnet PORT=9999)
+	@$(call say,  make CC=clang)
+	@$(call say,  make asan)
+	@$(call say,  make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal)
+	@$(call say,  make CC=x86_64-w64-mingw32-gcc PLATFORM=windows)
+	@$(call say,)
+	@$(call say,MSVC / NMake:  nmake /f Makefile.nmake [help])
+	@$(call say,)

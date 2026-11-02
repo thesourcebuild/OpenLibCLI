@@ -9,7 +9,7 @@
 #
 #  Usage
 #  -----
-#    nmake /f Makefile.nmake              build everything
+#    nmake /f Makefile.nmake              shared library + examples
 #    nmake /f Makefile.nmake lib          static library only
 #    nmake /f Makefile.nmake shared       shared library only
 #    nmake /f Makefile.nmake telnet       telnet server example
@@ -39,14 +39,21 @@ SRC_DIR     = cli
 INC_DIR     = cli
 EXAMPLE_DIR = examples
 
+# Examples: if any BUILD_EXAMPLE_* is set (command line or environment), the ones not set
+# default to 0 (opt-in, as in the GNU Makefile); otherwise telnet and serial are built.
+!IF DEFINED(BUILD_EXAMPLE_TELNET) || DEFINED(BUILD_EXAMPLE_TCP) || DEFINED(BUILD_EXAMPLE_SERIAL) || DEFINED(BUILD_EXAMPLE_PIPE) || DEFINED(BUILD_EXAMPLE_UNIX_SOCKET)
+EXAMPLE_DEFAULT = 0
+!ELSE
+EXAMPLE_DEFAULT = 1
+!ENDIF
 !IFNDEF BUILD_EXAMPLE_TELNET
-BUILD_EXAMPLE_TELNET = 1
+BUILD_EXAMPLE_TELNET = $(EXAMPLE_DEFAULT)
 !ENDIF
 !IFNDEF BUILD_EXAMPLE_TCP
 BUILD_EXAMPLE_TCP = 0
 !ENDIF
 !IFNDEF BUILD_EXAMPLE_SERIAL
-BUILD_EXAMPLE_SERIAL = 1
+BUILD_EXAMPLE_SERIAL = $(EXAMPLE_DEFAULT)
 !ENDIF
 !IFNDEF BUILD_EXAMPLE_PIPE
 BUILD_EXAMPLE_PIPE = 0
@@ -84,7 +91,6 @@ BASE_CFLAGS = /nologo /W4 /WX /std:c11 /O2 /Zi /FS /MT /Gy \
               /DWIN32 /D_WIN32
 CFLAGS         = $(BASE_CFLAGS) /Fd$(LIB_DIR)\vc.pdb
 SHARED_CFLAGS  = $(BASE_CFLAGS) /DCLI_SHARED /DBUILD_LIB_SHARED /Fd$(LIB_DIR)\openlibcli_dll.pdb
-EXAMPLE_CFLAGS = $(CFLAGS) /DCLI_SHARED
 
 ARFLAGS  = /nologo
 LDFLAGS  = /nologo /DEBUG /OPT:REF /OPT:ICF
@@ -94,7 +100,6 @@ PLAT_LIBS = ws2_32.lib
 #  Output files  (all land in build\msvc\)
 # ---------------------------------------------------------------------------
 STATIC_LIB   = $(LIB_DIR)\openlibcli_static.lib
-LIB_OUT      = $(SHARED_IMPLIB)
 SHARED_DLL   = $(BIN_DIR)\OpenLibCLI.dll
 SHARED_IMPLIB = $(LIB_DIR)\OpenLibCLI.lib
 SHARED_EXP   = $(LIB_DIR)\OpenLibCLI.exp
@@ -102,7 +107,22 @@ TELNET_BIN   = $(BIN_DIR)\cli_server_telnet.exe
 TCP_BIN      = $(BIN_DIR)\cli_server_tcp.exe
 SERIAL_BIN   = $(BIN_DIR)\cli_server_serial.exe
 PIPE_BIN     = $(BIN_DIR)\cli_server_pipe.exe
-DEMO_OBJ     = $(OBJ_DIR)\demo_config.obj
+
+# What the examples link: the shared library (through its import library), or the static
+# one when the shared library is not built. Their objects are compiled for it (CLI_SHARED
+# or not), so each mode has its own object directory.
+!IF "$(BUILD_LIB_SHARED)" == "1"
+LIB_DEP        = $(SHARED_DLL)
+LIB_LINK       = $(SHARED_IMPLIB)
+EXAMPLE_CFLAGS = $(CFLAGS) /DCLI_SHARED
+EX_OBJ_DIR     = $(OBJ_DIR)\examples-shared
+!ELSE
+LIB_DEP        = $(STATIC_LIB)
+LIB_LINK       = $(STATIC_LIB)
+EXAMPLE_CFLAGS = $(CFLAGS)
+EX_OBJ_DIR     = $(OBJ_DIR)\examples-static
+!ENDIF
+DEMO_OBJ     = $(EX_OBJ_DIR)\demo_config.obj
 
 # ---------------------------------------------------------------------------
 #  Library object files
@@ -161,8 +181,10 @@ all: $(ALL_TARGETS)
     @echo   Libraries    : $(LIB_DIR)
     @echo   Objects      : $(OBJ_DIR)
     @echo   Map files    : $(BUILD_DIR)
+!IF "$(BUILD_LIB_SHARED)" == "1"
     @echo   Shared DLL   : $(SHARED_DLL)
-    @echo   Import lib   : $(LIB_OUT)
+    @echo   Import lib   : $(SHARED_IMPLIB)
+!ENDIF
 !IF "$(BUILD_LIB_STATIC)" == "1"
     @echo   Static lib   : $(STATIC_LIB)
 !ENDIF
@@ -212,21 +234,21 @@ _dirs:
     @if not exist $(OBJ_DIR)             mkdir $(OBJ_DIR)
     @if not exist $(OBJ_DIR)\utils       mkdir $(OBJ_DIR)\utils
     @if not exist $(OBJ_SHARED_DIR)        mkdir $(OBJ_SHARED_DIR)
+    @if not exist $(EX_OBJ_DIR)            mkdir $(EX_OBJ_DIR)
 
 # ---------------------------------------------------------------------------
 #  Static library
 # ---------------------------------------------------------------------------
-!IF "$(BUILD_LIB_STATIC)" == "1"
+# 'lib' and 'shared' can always be built on request; BUILD_LIB_STATIC / BUILD_LIB_SHARED
+# only choose what the default target builds.
 lib: _dirs $(STATIC_LIB)
 
 $(STATIC_LIB): $(LIB_OBJS)
     $(AR) $(ARFLAGS) /OUT:$@ $**
-!ENDIF
 
 # ---------------------------------------------------------------------------
 #  Shared library
 # ---------------------------------------------------------------------------
-!IF "$(BUILD_LIB_SHARED)" == "1"
 shared: _dirs $(SHARED_DLL)
 
 # The import library $(SHARED_IMPLIB) is written by this link step and has no rule of its
@@ -237,7 +259,6 @@ $(SHARED_DLL): $(SHARED_SRCS) $(INC_DIR)\cli.h $(INC_DIR)\cli_env_detect.h \
     $(CC) $(SHARED_CFLAGS) /LD /Fo$(OBJ_SHARED_DIR)\ \
         $(SHARED_SRCS) \
         /link $(LDFLAGS) /OUT:$@ /IMPLIB:$(SHARED_IMPLIB) $(PLAT_LIBS)
-!ENDIF
 
 # ---------------------------------------------------------------------------
 #  Compile library objects  (NMake uses explicit rules, no pattern rules)
@@ -274,11 +295,11 @@ $(TELNET_BIN): $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.c \
                $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
                $(INC_DIR)\cli.h \
                $(INC_DIR)\config\cli_config.h \
-               $(DEMO_OBJ) $(SHARED_DLL)
-    $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.c \
+               $(DEMO_OBJ) $(LIB_DEP)
+    $(CC) $(EXAMPLE_CFLAGS) /Fo$(EX_OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.c \
         $(EXAMPLE_DIR)\win_linux\telnet\cli_transport_telnet.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_telnet.map \
-        $(DEMO_OBJ) $(LIB_OUT) $(PLAT_LIBS)
+        $(DEMO_OBJ) $(LIB_LINK) $(PLAT_LIBS)
 !ELSE
 telnet:
     @echo telnet requires BUILD_EXAMPLE_TELNET=1.
@@ -298,11 +319,11 @@ $(SERIAL_BIN): $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.c \
                $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
                $(INC_DIR)\cli.h \
                $(INC_DIR)\config\cli_config.h \
-               $(DEMO_OBJ) $(SHARED_DLL)
-    $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.c \
+               $(DEMO_OBJ) $(LIB_DEP)
+    $(CC) $(EXAMPLE_CFLAGS) /Fo$(EX_OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.c \
         $(EXAMPLE_DIR)\win_linux\serial\cli_transport_serial.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_serial.map \
-        $(DEMO_OBJ) $(LIB_OUT) $(PLAT_LIBS)
+        $(DEMO_OBJ) $(LIB_LINK) $(PLAT_LIBS)
 !ELSE
 uart:
     @echo uart requires BUILD_EXAMPLE_SERIAL=1.
@@ -322,11 +343,11 @@ $(TCP_BIN): $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.c \
             $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
             $(INC_DIR)\cli.h \
             $(INC_DIR)\config\cli_config.h \
-            $(DEMO_OBJ) $(SHARED_DLL)
-    $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.c \
+            $(DEMO_OBJ) $(LIB_DEP)
+    $(CC) $(EXAMPLE_CFLAGS) /Fo$(EX_OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.c \
         $(EXAMPLE_DIR)\win_linux\tcp\cli_transport_tcp.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_tcp.map \
-        $(DEMO_OBJ) $(LIB_OUT) $(PLAT_LIBS)
+        $(DEMO_OBJ) $(LIB_LINK) $(PLAT_LIBS)
 !ELSE
 tcp:
     @echo tcp requires BUILD_EXAMPLE_TCP=1.
@@ -345,11 +366,11 @@ $(PIPE_BIN): $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
              $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
              $(INC_DIR)\cli.h \
              $(INC_DIR)\config\cli_config.h \
-             $(DEMO_OBJ) $(SHARED_DLL)
-    $(CC) $(EXAMPLE_CFLAGS) /Fo$(OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
+             $(DEMO_OBJ) $(LIB_DEP)
+    $(CC) $(EXAMPLE_CFLAGS) /Fo$(EX_OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
         $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_pipe.map \
-        $(DEMO_OBJ) $(LIB_OUT) $(PLAT_LIBS) advapi32.lib
+        $(DEMO_OBJ) $(LIB_LINK) $(PLAT_LIBS) advapi32.lib
 !ELSE
 pipe:
     @echo pipe requires BUILD_EXAMPLE_PIPE=1.
@@ -360,7 +381,7 @@ pipe:
 #  Run targets
 # ---------------------------------------------------------------------------
 !IF "$(BUILD_EXAMPLE_TELNET)" == "1"
-run-telnet: $(TELNET_BIN)
+run-telnet: telnet
     @$(TELNET_BIN) 2323
 !ELSE
 run-telnet:
@@ -369,7 +390,7 @@ run-telnet:
 !ENDIF
 
 !IF "$(BUILD_EXAMPLE_SERIAL)" == "1"
-run-serial: $(SERIAL_BIN)
+run-serial: uart
     @$(SERIAL_BIN)
 !ELSE
 run-serial:
@@ -378,7 +399,7 @@ run-serial:
 !ENDIF
 
 !IF "$(BUILD_EXAMPLE_TCP)" == "1"
-run-tcp: $(TCP_BIN)
+run-tcp: tcp
     @$(TCP_BIN) 2323
 !ELSE
 run-tcp:
@@ -386,7 +407,7 @@ run-tcp:
     @cmd /c exit 1
 !ENDIF
 !IF "$(BUILD_EXAMPLE_PIPE)" == "1"
-run-pipe: $(PIPE_BIN)
+run-pipe: pipe
     @$(PIPE_BIN) anon
 !ELSE
 run-pipe:
@@ -433,7 +454,7 @@ help:
     @echo.
     @echo  Targets:
     @echo    (default)                  Build shared library + examples  (add BUILD_LIB_STATIC=1 for static)
-    @echo    lib                        Static library only  (requires BUILD_LIB_STATIC=1)
+    @echo    lib                        Static library only
     @echo    shared                     Shared library only
     @echo    telnet                     Telnet server example
     @echo    tcp                        TCP server example
@@ -450,7 +471,7 @@ help:
     @echo.
     @echo  Variables:
     @echo    BUILD_EXAMPLE_TELNET=0^|1      Enable Telnet transport and telnet demo
-    @echo    BUILD_EXAMPLE_TCP=0^|1         Enable TCP transport
+    @echo    BUILD_EXAMPLE_TCP=0^|1         Enable TCP transport and tcp demo
     @echo    BUILD_EXAMPLE_SERIAL=0^|1      Enable generic serial transport and serial demo
     @echo    BUILD_EXAMPLE_PIPE=0^|1        Enable pipe transport and pipe demo
     @echo    BUILD_EXAMPLE_UNIX_SOCKET=0^|1 Enable UNIX socket transport (POSIX-only demo)
@@ -460,7 +481,7 @@ help:
     @echo  Usage (recommended):
     @echo    Use the build wrapper which auto-initialises Visual Studio:
     @echo      scripts\build-helpers\build.bat
-    @echo
+    @echo.
     @echo    Or run NMake directly from a Visual Studio "x64 Native Tools" prompt:
     @echo      nmake /f Makefile.nmake
     @echo      nmake /f Makefile.nmake run-telnet

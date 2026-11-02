@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-Generate cli/cli_version.h from the version file and (optionally) git describe.
+Generate cli/cli_version.h from the version file.
 
 Usage:
-    python scripts/gen_version_header.py          # uses version file + git
-    python scripts/gen_version_header.py --no-git # version file only
+    python scripts/gen_version_header.py
 
-Reads <project-root>/version (format "X.Y.Z"), parses numeric components,
-optionally tries git describe for the version string, and writes
-<project-root>/cli/cli_version.h.
+Reads <project-root>/version (format "X.Y.Z") and writes <project-root>/cli/cli_version.h
+and the version line of library.properties. The output depends only on the version file,
+and a file is written only when its content changes: the header is tracked in git and
+included by every source, so a build must not rewrite it.
 """
 
-import argparse
 import os
-import subprocess
 import sys
-import time
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +20,7 @@ PROJECT_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, ".."))
 VERSION_FILE = os.path.join(PROJECT_ROOT, "version")
 OUTPUT_FILE = os.path.join(PROJECT_ROOT, "cli", "cli_version.h")
 LIBRARY_PROPS = os.path.join(PROJECT_ROOT, "library.properties")
+COPYRIGHT = "Copyright (c) 2026 Muhammad Hassaan Shah"
 
 
 def parse_version_file(path):
@@ -40,23 +38,6 @@ def parse_version_file(path):
     return int(major), int(minor), int(revision)
 
 
-def try_git_describe():
-    git_dir = os.path.join(PROJECT_ROOT, ".git")
-    if not os.path.isdir(git_dir):
-        return None
-    try:
-        result = subprocess.run(
-            ["git", "describe", "--tags", "--dirty", "--always"],
-            capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=10,
-        )
-        if result.returncode == 0:
-            desc = result.stdout.strip()
-            return desc if desc else None
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return None
-
-
 def update_library_properties(version_str):
     if not os.path.exists(LIBRARY_PROPS):
         return
@@ -65,10 +46,9 @@ def update_library_properties(version_str):
     changed = False
     for i, line in enumerate(lines):
         if line.startswith("version="):
-            old = line.strip()
-            lines[i] = f"version={version_str}\n"
-            if lines[i] != old:
-                changed = True
+            new = f"version={version_str}\n"
+            changed = (line != new)
+            lines[i] = new
             break
     if changed:
         with open(LIBRARY_PROPS, "w", newline="\n", encoding="utf-8") as f:
@@ -76,15 +56,8 @@ def update_library_properties(version_str):
         print(f"  Updated  : library.properties -> version={version_str}")
 
 
-def generate_header(major, minor, revision, git_desc):
-    now = time.localtime()
-    year = now.tm_year
-
-    version_source = "version file"
+def generate_header(major, minor, revision):
     version_str = f"{major}.{minor}.{revision}"
-    if git_desc:
-        version_source += " + git describe"
-        version_str = git_desc
 
     lines = [
         "/**",
@@ -92,12 +65,12 @@ def generate_header(major, minor, revision, git_desc):
         " * @brief Version information for the OpenLibCLI Library.",
         " *",
         " * AUTO-GENERATED — do not edit manually.",
-        f" * Source: {version_source}",
+        " * Source: version file",
         " *",
         " * Defines the library version as individual numeric components, as a packed",
         " * 32-bit word, and as a human-readable string.",
         " *",
-        f" * @copyright Copyright (c) {year} Muhammad Hassaan Shah",
+        f" * @copyright {COPYRIGHT}",
         " *",
         " * SPDX-License-Identifier: MIT",
         " */",
@@ -224,35 +197,40 @@ def generate_header(major, minor, revision, git_desc):
     return "\n".join(lines)
 
 
+def write_header(content):
+    """Write the header only when its content changes. When it is unchanged but older than
+    the version file, its time is updated, so a build that compares the two does not run
+    this script again."""
+    old = None
+    if os.path.exists(OUTPUT_FILE):
+        # Read with newline translation: a CRLF checkout (git autocrlf) holds the same text.
+        with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
+            old = f.read()
+    if old != content:
+        with open(OUTPUT_FILE, "w", newline="\n", encoding="utf-8") as f:
+            f.write(content)
+        print(f"[gen_version_header] Generated {OUTPUT_FILE}")
+    else:
+        if os.path.getmtime(OUTPUT_FILE) < os.path.getmtime(VERSION_FILE):
+            os.utime(OUTPUT_FILE, None)
+        print(f"[gen_version_header] Up to date: {OUTPUT_FILE}")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Generate cli/cli_version.h")
-    parser.add_argument("--no-git", action="store_true", help="Skip git describe")
-    args = parser.parse_args()
+    if len(sys.argv) > 1:
+        print(f"usage: {os.path.basename(sys.argv[0])}", file=sys.stderr)
+        sys.exit(2)
 
     if not os.path.exists(VERSION_FILE):
         print(f"error: version file not found at '{VERSION_FILE}'", file=sys.stderr)
         sys.exit(1)
 
     major, minor, revision = parse_version_file(VERSION_FILE)
-    git_desc = None if args.no_git else try_git_describe()
-
-    content = generate_header(major, minor, revision, git_desc)
-
-    with open(OUTPUT_FILE, "w", newline="\n", encoding="utf-8") as f:
-        f.write(content)
-    print(f"[gen_version_header] Generated {OUTPUT_FILE}")
+    write_header(generate_header(major, minor, revision))
 
     version_str = f"{major}.{minor}.{revision}"
     update_library_properties(version_str)
-
-    if git_desc:
-        print(f"  Version string : {git_desc}")
-    else:
-        print(f"  Version string : {version_str}")
-    if git_desc:
-        print(f"  Source         : version file + git describe")
-    else:
-        print(f"  Source         : version file")
+    print(f"  Version string : {version_str}")
 
 
 if __name__ == "__main__":

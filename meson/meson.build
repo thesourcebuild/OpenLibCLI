@@ -1,6 +1,11 @@
-# OpenLibCLI — Meson subproject / wrap build file
-# Installed into the consumer's subprojects/ directory so that
-# dependency('OpenLibCLI') resolves automatically.
+# OpenLibCLI — Meson build file of the source package (install/OpenLibCLI-<version>-meson/)
+# The package scripts copy it into the package root; there the package is used as a
+# subproject (dependency('OpenLibCLI')) or built on its own.
+#
+# Package layout:
+#   include/OpenLibCLI/   public headers (config/, utils/)
+#   src/                  library source tree
+#   examples/             serial and telnet examples (-Dbuild_examples=true)
 
 project(
     'OpenLibCLI',
@@ -9,37 +14,59 @@ project(
     license : 'MIT',
     license_files : ['LICENSE'],
     default_options : ['warning_level=3', 'c_std=c99'],
+    meson_version : '>=1.1.0',
 )
 
 # c99 makes glibc / musl hide POSIX: without it the default time source loses
 # CLOCK_MONOTONIC and falls back to the wall clock.
 if host_machine.system() == 'linux'
-  add_project_arguments('-D_DEFAULT_SOURCE', language: 'c')
+  add_project_arguments('-D_DEFAULT_SOURCE', language : 'c')
+endif
+
+cc = meson.get_compiler('c')
+platform_deps = []
+if host_machine.system() == 'windows'
+  platform_deps += cc.find_library('ws2_32')
 endif
 
 # -DCLI_SHARED -DBUILD_LIB_SHARED: OPENLIBCLI_API becomes __declspec(dllexport) on Windows;
 # without exported symbols MSVC produces no import library (as in the top-level build).
 openlibcli_lib = library(
     meson.project_name(),
-    'cli/cli.c',
-    'cli/utils/cli_args_parse.c',
-    include_directories : include_directories('cli'),
+    'src/cli.c',
+    'src/utils/cli_args_parse.c',
+    include_directories : include_directories('src'),
     c_args : ['-DCLI_SHARED', '-DBUILD_LIB_SHARED'],
+    dependencies : platform_deps,
     install : true,
 )
 
-# ── Public headers: include/OpenLibCLI/ (config/, utils/ as in the source tree) ──
-install_headers('cli/cli.h', 'cli/cli_env_detect.h', 'cli/cli_version.h',
-    subdir : 'OpenLibCLI')
-install_headers('cli/config/cli_config.h', 'cli/config/cli_embedded_config.h',
-    subdir : 'OpenLibCLI/config')
-install_headers('cli/utils/cli_args_parse.h',
-    subdir : 'OpenLibCLI/utils')
-
 openlibcli_dep = declare_dependency(
-    include_directories : ['cli'],
+    include_directories : include_directories('include/OpenLibCLI'),
     link_with : openlibcli_lib,
+    dependencies : platform_deps,
     version : meson.project_version(),
 )
 
 meson.override_dependency(meson.project_name(), openlibcli_dep)
+
+# Public headers: include/OpenLibCLI/ (config/, utils/)
+install_subdir('include/OpenLibCLI', install_dir : get_option('includedir'))
+
+if get_option('build_examples')
+  demo_src = files('examples/shared/cli_demo_setup.c')
+  executable('cli_server_serial',
+      'examples/win_linux/serial/cli_server_serial.c',
+      'examples/win_linux/serial/cli_transport_serial.c',
+      demo_src,
+      dependencies : openlibcli_dep,
+      install : false,
+  )
+  executable('cli_server_telnet',
+      'examples/win_linux/telnet/cli_server_telnet.c',
+      'examples/win_linux/telnet/cli_transport_telnet.c',
+      demo_src,
+      dependencies : openlibcli_dep,
+      install : false,
+  )
+endif

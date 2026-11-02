@@ -83,6 +83,10 @@
 #error "CLI_MAX_RX_BYTES_PER_TICK must be at least 1"
 #endif
 
+#if CLI_MAX_OUTPUT_BUF < 3
+#error "CLI_MAX_OUTPUT_BUF must be at least 3: an error line holds the \"% \" prefix and a NUL"
+#endif
+
 #if (CLI_ENABLE_IDLE_TIMEOUT || CLI_ENABLE_PERIODIC_CALLBACK) && !CLI_ENABLE_TIME_SOURCE
 #error "CLI_ENABLE_IDLE_TIMEOUT and CLI_ENABLE_PERIODIC_CALLBACK need a clock: leave CLI_ENABLE_TIME_SOURCE at its default (derived from them) or disable both features"
 #endif
@@ -617,7 +621,9 @@ OPENLIBCLI_API int8_t cli_cmd_builtin_enable(cli_struct_t *cli, const char *cmd,
   } else if (cli->privilege >= CLI_PRIV_PRIVILEGED || !needs_secret) {
     rc = cli_set_mode(cli, CLI_MODE_ENABLE);
     if (rc == CLI_OK) {
-      cli_set_privilege(cli, CLI_PRIV_PRIVILEGED);
+      if (cli->privilege < CLI_PRIV_PRIVILEGED) {
+        cli_set_privilege(cli, CLI_PRIV_PRIVILEGED); /* raised to it, never lowered */
+      }
     } else {
       CLI_WSTR(cli, "% Navigation depth limit reached.\r\n");
     }
@@ -707,9 +713,15 @@ OPENLIBCLI_API int8_t cli_cmd_builtin_history(cli_struct_t *cli, const char *cmd
       for (cli_history_idx_t i = cli->history_count; i > 0; i--) {
         cli_history_idx_t idx = cli_history_index(cli, i);
         char line[16 + CLI_MAX_INPUT_LEN];
-        (void)cli_snprintf(line, sizeof(line), "  %3d  %s", cli->history_count - i + 1,
-                           &cli->history_buf[cli->history_off[idx]]);
-        (void)cli_println(cli, "%s", line);
+        int len = cli_snprintf(line, sizeof(line), "  %3d  %s", cli->history_count - i + 1,
+                               &cli->history_buf[cli->history_off[idx]]);
+        /* Sent as text, not through cli_println(): its format buffer (CLI_MAX_OUTPUT_BUF) may
+         * be shorter than an entry. */
+        if (len > 0) {
+          int shown = (len < (int)sizeof(line)) ? len : (int)sizeof(line) - 1;
+          cli_print_process_stream(cli, line, shown);
+          cli_print_process_stream(cli, "\n", 1);
+        }
       }
     }
   }
@@ -1027,6 +1039,10 @@ OPENLIBCLI_API int8_t cli_session_engine(cli_struct_t *cli) {
     result = CLI_ERR;
   }
 
+  /* Everything this tick wrote (echo, line edits, completions, the message before a close)
+   * reaches the peer now, not only with the next prompt. */
+  cli_flush(cli);
+
 #if CLI_ENABLE_TIMMING_STATS
   if (cli->micros_source != NULL) {
     uint32_t elapsed = cli->micros_source(cli->micros_source_ctx) - t0;
@@ -1180,6 +1196,7 @@ OPENLIBCLI_API void cli_done(cli_struct_t *cli) {
       (void)cli_println(cli, "  Max (us): %lu", (unsigned long)cli->tick_stats.max_us);
     }
 #endif
+    cli_flush(cli);
     cli->session_state = CLI_SESSION_STOP;
     (void)memset(cli, 0, sizeof(*cli));
   }
@@ -1191,6 +1208,17 @@ OPENLIBCLI_API cli_session_state_enum_t cli_get_session_state(const cli_struct_t
 
 OPENLIBCLI_API void cli_restart_session(cli_struct_t *cli) {
   if (cli != NULL) {
+    if (cli->exec_depth == 0U && cli->session_state == CLI_SESSION_RUN) {
+      /* Outside any command the prompt (with what was typed) is on screen: deliver what was
+       * printed so far and start the new session below it, as cli_request_auth() does.
+       * Inside a command, its output is finished when it returns (cli_command_end()). */
+#if CLI_HAS_LINE_BUFFER
+      if (cli->filter_line_buf_len > 0) {
+        cli_line_buffer_emit(cli);
+      }
+#endif
+      CLI_WSTR(cli, CLI_CRLF);
+    }
     /* The line-ending state is kept: when 'quit' arrives with CR LF, the LF still belongs to
      * that line and must not submit an empty line to the restarted session. */
     cli_session_reset(cli);
@@ -1563,7 +1591,10 @@ OPENLIBCLI_API cli_cmd_handle_t cli_add_command_duplicate(cli_struct_t *cli,
                                                           const char *alias_name) {
   cli_cmd_handle_t rc = CLI_CMD_INVALID;
 
-  if (cli_handle_valid(cli, original) && alias_name != NULL) {
+  /* Sub-commands are not shared: a duplicate of a submenu would be reachable without them
+   * (an inline alias, cli_cmd_add_alias(), keeps them). */
+  if (cli_handle_valid(cli, original) && alias_name != NULL &&
+      !cli_cmd_has_children(cli, original)) {
     const cli_cmd_struct_t *orig = &cli->cmd_pool[original];
     /* The new name comes from the caller (program memory on AVR); the copied help text
      * already lives in the original node, i.e. in RAM. */
@@ -1926,6 +1957,11 @@ static int8_t cli_exec_area_run(cli_struct_t *cli, char *line, size_t len) {
     /* The command may have emptied the editor (password prompt, session restart) while
      * its bytes were still in use; terminate the editor's line now that nothing runs. */
     cli->input[cli->input_len] = '\0';
+    if (rc == CLI_ERR_QUIT || rc == CLI_ERR_AUTH) {
+      /* Ends the session exactly as the same command typed at the prompt does. Nested in
+       * another command, the result is that command's to act on. */
+      cli->session_state = CLI_SESSION_STOP;
+    }
   }
 
 #if CLI_ENABLE_HISTORY && CLI_HISTORY_INDEX_SELECTION
@@ -1946,6 +1982,10 @@ static int8_t cli_exec_area_run(cli_struct_t *cli, char *line, size_t len) {
    * the command requested. Not after a restart or stop (the banner or nothing follows). */
   if (on_prompt && !redrawn && cli->session_state == CLI_SESSION_RUN) {
     cli_redisplay_input(cli);
+  }
+  if (top_level) {
+    /* Possibly called from the main loop, outside any engine tick. */
+    cli_flush(cli);
   }
 
   return rc;
@@ -2023,7 +2063,7 @@ OPENLIBCLI_API int cli_println_p(cli_struct_t *cli, const char *fmt, ...) {
     //-V::2604
     (void)va_end(ap);
 
-    rc = (n < 0) ? n : (n + 1);
+    rc = (n < 0) ? n : (n + 2); /* the documented count includes the \r\n */
     if (n < 0) {
       /* Encoding error: buf contents are unspecified, emit nothing. */
     } else if (cli->print_cb != NULL) {
@@ -2053,15 +2093,20 @@ OPENLIBCLI_API int cli_error_p(cli_struct_t *cli, const char *fmt, ...) {
     //-V::2604
     (void)va_end(ap);
   } else {
+    /* The message is formatted after its "% " prefix, so the line with the prefix can be
+     * delivered as a whole (print_transport_cb receives it like the terminal shows it). */
     char buf[CLI_MAX_OUTPUT_BUF];
+    char *msg = &buf[2];
 
+    buf[0] = '%';
+    buf[1] = ' ';
     //-V::2604
     (void)va_start(ap, fmt);
 #if defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
     //-V:vsnprintf_P:2600
-    n = vsnprintf_P(buf, sizeof(buf), fmt, ap);
+    n = vsnprintf_P(msg, sizeof(buf) - 2U, fmt, ap);
 #else
-    n = cli_vsnprintf(buf, sizeof(buf), fmt, ap);
+    n = cli_vsnprintf(msg, sizeof(buf) - 2U, fmt, ap);
 #endif
     //-V::2604
     (void)va_end(ap);
@@ -2070,8 +2115,8 @@ OPENLIBCLI_API int cli_error_p(cli_struct_t *cli, const char *fmt, ...) {
       /* Encoding error: buf contents are unspecified, emit nothing. */
       rc = n;
     } else if (cli->print_cb != NULL) {
-      cli->print_cb(cli, buf, CLI_PRINT_KIND_ERROR);
-      rc = (int)strlen(buf);
+      cli->print_cb(cli, msg, CLI_PRINT_KIND_ERROR); /* the kind tells it is an error */
+      rc = (int)strlen(msg);
     } else {
       /* Errors bypass filters and always appear — after any output already produced, so a
        * buffered partial line is delivered first. */
@@ -2089,11 +2134,10 @@ OPENLIBCLI_API int cli_error_p(cli_struct_t *cli, const char *fmt, ...) {
         if (!in_command) {
           CLI_WSTR(cli, CLI_CRLF);
         }
-        CLI_WSTR(cli, "% ");
         cli_write_str(cli, buf);
         CLI_WSTR(cli, CLI_CRLF);
       }
-      rc = (int)strlen(buf);
+      rc = (int)strlen(msg);
     }
   }
 
@@ -2405,6 +2449,7 @@ static void cli_raw_write(cli_struct_t *cli, const uint8_t *buf, cli_transport_b
         cli->tx_error = True;
       } else {
         sent += (cli_transport_buflen_t)n;
+        cli->tx_unflushed = True;
       }
     }
   }
@@ -2455,18 +2500,22 @@ static void cli_write_text(cli_struct_t *cli, const char *data, int len) {
   }
   if (len > start) {
     cli_raw_write(cli, (const uint8_t *)&data[start], (cli_transport_buflen_t)(len - start));
-    cli->out_open = True; /* text after the last newline: the line is still open */
+    /* Text after the last newline: a command's line is still open. Output printed outside
+     * any command (a callback) is not tracked: the next line ending typed ends its line. */
+    cli->out_open = (cli->exec_depth > 0U);
   }
 }
 
 /**
- * @brief Flush the transport's send buffer if a flush function is registered.
+ * @brief Flush the transport's send buffer if a flush function is registered and
+ *        anything was written since the last flush.
  * @param[in] cli  Active CLI session.
  */
 static void cli_flush(cli_struct_t *cli) {
-  if (cli->transport.flush != NULL) {
+  if (cli->tx_unflushed && cli->transport.flush != NULL) {
     (void)cli->transport.flush(cli->transport.ctx);
   }
+  cli->tx_unflushed = False;
 }
 
 /* Session Timing Helpers ---------------------------------------------------------------*/
@@ -4590,8 +4639,15 @@ static int8_t cli_execute(cli_struct_t *cli, char *line, bool interactive) {
 static bool cli_command_begin(cli_struct_t *cli) {
   bool outermost;
 
+  outermost = (cli->exec_depth == 0U);
+#if CLI_HAS_LINE_BUFFER
+  if (outermost && cli->filter_line_buf_len > 0) {
+    /* A partial line printed outside any command (a callback) is a line of its own, not the
+     * start of this command's output or input to its filter. */
+    cli_line_buffer_emit(cli);
+  }
+#endif
   cli->exec_depth++;
-  outermost = (cli->exec_depth == 1U);
 #if CLI_ENABLE_PIPE_FILTER
   if (outermost) {
     cli_filter_reset(cli);
@@ -4771,7 +4827,13 @@ static int8_t cli_auth_verify(cli_struct_t *cli) {
     }
   }
 
-  if (ok == CLI_OK) {
+  if (cli->session_state != CLI_SESSION_RUN) {
+    /* The callback restarted or stopped the session: this attempt belongs to the old one. */
+  } else if (cli->auth_state != CLI_AUTH_PASSWORD) {
+    /* The callback asked for a new login (cli_request_auth()). That replaces this attempt;
+     * its prompt is shown now, after the callback. */
+    cli_redisplay_input(cli);
+  } else if (ok == CLI_OK) {
     cli->auth_state = CLI_AUTH_AUTHENTICATED;
     cli->auth_attempts = 0;
     if (cli->privilege >= CLI_PRIV_PRIVILEGED) {
@@ -4855,7 +4917,9 @@ static int8_t cli_auth_submit_line(cli_struct_t *cli) {
     }
     cli_wipe_input(cli); /* do not leave the secret in memory */
 
-    if (cli->auth_state != CLI_AUTH_ENABLE_MODE_PASSWORD) {
+    if (cli->session_state != CLI_SESSION_RUN) {
+      /* The callback restarted or stopped the session: nothing of this attempt is shown. */
+    } else if (cli->auth_state != CLI_AUTH_ENABLE_MODE_PASSWORD) {
       /* The callback asked for something else instead (cli_request_auth(): a new login).
        * That replaces this attempt; its prompt is shown now, after the callback. */
       cli_redisplay_input(cli);
@@ -4944,6 +5008,8 @@ static int8_t cli_auth_handle(cli_struct_t *cli, int byte) {
       if (exec_rc == CLI_ERR_AUTH) {
         cli->session_state = CLI_SESSION_STOP;
         rc = CLI_ERR_AUTH;
+      } else if (cli->session_state != CLI_SESSION_RUN) {
+        /* A callback restarted or stopped the session: the banner (or nothing) follows. */
       } else if (cli->auth_state == CLI_AUTH_NONE || cli->auth_state == CLI_AUTH_AUTHENTICATED) {
         cli_show_prompt(cli);
       } else {
@@ -5050,13 +5116,17 @@ static void cli_session_reset(cli_struct_t *cli) {
   cli->history_replay = (cli_history_idx_t)-1;
 #endif
 #endif
+  if (cli->exec_depth == 0U) {
+    /* While a command runs (it restarted the session), the output state is its own:
+     * cli_command_end() delivers the rest, applies the filter and resets it. */
 #if CLI_ENABLE_PIPE_FILTER
-  cli_filter_reset(cli);
+    cli_filter_reset(cli);
 #endif
 #if CLI_HAS_LINE_BUFFER
-  cli->filter_line_buf_len = 0;
+    cli->filter_line_buf_len = 0;
 #endif
-  cli->out_open = False;
+    cli->out_open = False;
+  }
 #if CLI_ENABLE_AUTH
   cli->auth_state = CLI_AUTH_NONE;
   cli->auth_attempts = 0;

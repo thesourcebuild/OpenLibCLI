@@ -10,7 +10,7 @@
 #
 #  Usage
 #  -----
-#    ./scripts/build-helpers/build_mingw_gcc.sh                       Build static + shared + telnet + serial
+#    ./scripts/build-helpers/build_mingw_gcc.sh                       Build shared library + telnet + serial
 #    ./scripts/build-helpers/build_mingw_gcc.sh lib                   Static library only
 #    ./scripts/build-helpers/build_mingw_gcc.sh shared                Shared library only
 #    ./scripts/build-helpers/build_mingw_gcc.sh telnet                Telnet server example
@@ -155,7 +155,7 @@ case "$TARGETS_STR" in
         echo "  build/gcc/embedded-baremetal/  Bare-metal cross-compile"
         echo ""
         echo "Targets:"
-        echo "  (none)           Static + shared libraries + telnet + serial examples  [default]"
+        echo "  (none)           Shared library + telnet + serial examples  [default; BUILD_LIB_STATIC=1 adds the static library]"
         echo "  lib              Static library only"
         echo "  shared           Shared library only"
         echo "  telnet           Telnet server example"
@@ -178,8 +178,7 @@ case "$TARGETS_STR" in
         echo "  PORT=2323                 Telnet port (default: 2323)"
         echo "  BUILD_ASAN=0|1               Build with AddressSanitizer (default: 0)"
         echo "  BUILD_EXAMPLE_TELNET=0|1      Enable Telnet transport / telnet demo"
-        echo "  BUILD_EXAMPLE_TCP=0|1         Enable TCP transport (tcp demo also requires"
-        echo "                             BUILD_EXAMPLE_TELNET=1) (default: 0)"
+        echo "  BUILD_EXAMPLE_TCP=0|1         Enable TCP transport / tcp demo (default: 0)"
         echo "  BUILD_EXAMPLE_SERIAL=0|1      Enable generic serial transport / demo (default: 1)"
         echo "  BUILD_EXAMPLE_PIPE=0|1        Enable pipe transport / demo (default: 0)"
         echo "  BUILD_EXAMPLE_UNIX_SOCKET=0|1 Enable UNIX socket transport / demo (default: 0)"

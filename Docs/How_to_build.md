@@ -19,21 +19,21 @@ See [`cli/config/cli_config.h`](../cli/config/cli_config.h) for the complete lis
 
 ## Build variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `BUILD_EXAMPLE_TELNET=0\|1` | 1 | Telnet transport + example server |
-| `BUILD_EXAMPLE_TCP=0\|1` | 0 | TCP transport + example server |
-| `BUILD_EXAMPLE_SERIAL=0\|1` | 1 | Serial transport + example server |
-| `BUILD_EXAMPLE_PIPE=0\|1` | 0 | Pipe transport + example server |
-| `BUILD_EXAMPLE_UNIX_SOCKET=0\|1` | 0 | UNIX socket example (POSIX only) |
-| `BUILD_LIB_STATIC=0\|1` | 0 | Build static library in addition to shared |
-| `BUILD_LIB_SHARED=0\|1` | 1 | Build shared library |
+| Variable | GNU make, NMake | CMake | Meson | Description |
+| --- | --- | --- | --- | --- |
+| `BUILD_EXAMPLE_TELNET` | 1 | OFF | false | Telnet transport + example server |
+| `BUILD_EXAMPLE_TCP` | 0 | OFF | false | TCP transport + example server |
+| `BUILD_EXAMPLE_SERIAL` | 1 | OFF | false | Serial transport + example server |
+| `BUILD_EXAMPLE_PIPE` | 0 | OFF | false | Pipe transport + example server |
+| `BUILD_EXAMPLE_UNIX_SOCKET` | 0 | OFF | false | UNIX socket example (POSIX only) |
+| `BUILD_LIB_STATIC` | 0 | OFF | — | Static library in addition to the shared one (Meson always builds both) |
+| `BUILD_LIB_SHARED` | 1 | — | — | Shared library (CMake and Meson always build it) |
 
-Passing any `BUILD_EXAMPLE_*` explicitly disables all other examples not mentioned (opt-in model).
+With GNU make and NMake, passing any `BUILD_EXAMPLE_*` explicitly disables all other examples not mentioned (opt-in model). CMake and Meson build only the examples that are switched on (`-DBUILD_EXAMPLE_SERIAL=ON`, `-DBUILD_EXAMPLE_SERIAL=true`).
 
 ## Build from Packages
 
-Pre-built packages are available as release artifacts. Each package ships the library sources, headers, config files, and reference examples (serial + telnet) ready to build.
+Pre-built packages are available as release artifacts. Each package ships the library sources, headers and config files; the CMake and Meson packages also ship the reference examples (serial + telnet), ready to build.
 
 ### Option 1 — Source Drop-in Package
 
@@ -81,7 +81,8 @@ The `OpenLibCLI::OpenLibCLI` target carries all required platform dependencies (
 
 ```bash
 cd OpenLibCLI-<version>-cmake
-cmake -S examples -B examples/build -DCMAKE_PREFIX_PATH=.
+# A relative CMAKE_PREFIX_PATH is taken relative to the source directory (examples/)
+cmake -S examples -B examples/build -DCMAKE_PREFIX_PATH=..
 cmake --build examples/build
 ```
 
@@ -99,10 +100,10 @@ Run the examples:
 
 #### Custom configuration
 
-Override compile-time limits at the consumer side:
+The package builds the library in your project, so its compile-time limits can be changed there. Most of them size the members of `cli_struct_t`: the library and every file that includes `cli.h` must be compiled with the same values, so set them `PUBLIC` (a `PRIVATE` setting gives the library and your code different struct layouts, and memory is corrupted at run time):
 
 ```cmake
-target_compile_definitions(OpenLibCLI PRIVATE
+target_compile_definitions(OpenLibCLI PUBLIC
     CLI_MAX_HISTORY=10
 )
 ```
@@ -110,22 +111,22 @@ target_compile_definitions(OpenLibCLI PRIVATE
 We can also pre-include the config profile via the include path:
 
 ```cmake
-target_include_directories(OpenLibCLI PRIVATE path/to/config/)
-target_compile_definitions(OpenLibCLI PRIVATE CLI_BUILD_CONFIG_HEADER_ENABLED=1)
+target_include_directories(OpenLibCLI PUBLIC path/to/config/)
+target_compile_definitions(OpenLibCLI PUBLIC CLI_BUILD_CONFIG_HEADER_ENABLED=1)
 ```
 
-Where `path/to/config/` contains a `cli_config.h` with embedded-tuned values (e.g., reduced `CLI_MAX_HISTORY`). See `install/cli/config/cli_embedded_config.h` for a reference AVR/embedded profile.
+Where `path/to/config/` contains a `cli_config.h` with embedded-tuned values (e.g., reduced `CLI_MAX_HISTORY`). See `include/OpenLibCLI/config/cli_embedded_config.h` in the package for a reference AVR/embedded profile.
 
 Pool capacity (`CLI_MAX_COMMANDS`) is **not** defined by the library — it must be set by the application before including `cli.h`, or passed as a literal to `cli_init()`.
 
 Or provide a user-defined config header at any path:
 
 ```cmake
-target_compile_definitions(OpenLibCLI PRIVATE
+target_compile_definitions(OpenLibCLI PUBLIC
     CLI_BUILD_CONFIG_HEADER_ENABLED=1
     CLI_CONFIG_HEADER_PATH="my_config/my_settings.h"
 )
-target_include_directories(OpenLibCLI PRIVATE /path/to/my_config)
+target_include_directories(OpenLibCLI PUBLIC /path/to/my_config)
 ```
 
 When `CLI_BUILD_CONFIG_HEADER_ENABLED=1` is defined, the library includes the header specified by `CLI_CONFIG_HEADER_PATH` (defaults to `"cli_config.h"` in the include path) instead of the built-in config fallback logic. This is useful when the compiler lacks `__has_include` or the config header is at a non-standard location.
@@ -166,14 +167,17 @@ Copy the package into `subprojects/`:
 cp -r OpenLibCLI-<version>-meson /path/to/your-project/subprojects/OpenLibCLI
 ```
 
-Or use a `.wrap` file (included in the release):
+Or use the wrap file `install/wrap/OpenLibCLI.wrap` (made by `scripts/package-helpers/package_meson_wrap`) as `subprojects/OpenLibCLI.wrap`. It fetches the release tag `v<version>` of the repository with git, so it works for versions that have been tagged:
 
 ```ini
 # subprojects/OpenLibCLI.wrap
-[wrap-file]
-directory = OpenLibCLI-<version>-meson
-source_filename = OpenLibCLI-<version>-meson.tar.gz
-source_url = https://github.com/.../releases/...
+[wrap-git]
+url      = https://github.com/thesourcebuild/OpenLibCLI.git
+revision = v<version>
+depth    = 1
+
+[provide]
+OpenLibCLI = openlibcli_dep
 ```
 
 Then in your `meson.build`:
@@ -192,7 +196,7 @@ executable('my_app', 'main.c',
 
 ## Build using Build-Helpers scripts
 
-The `scripts/build-helpers/` directory contains build wrappers for all supported toolchains. Each builder supports common targets (`all`, `lib`, `shared`, `clean`, `clean-all`) and `BUILD_EXAMPLE_*` variables.
+The `scripts/build-helpers/` directory contains build wrappers for all supported toolchains. All of them take `BUILD_EXAMPLE_*` variables. The make-based builders (`build_mingw_gcc`, `build_msvc`) also take make targets (`all`, `lib`, `shared`, `clean`, `clean-all`, `run-*`); `build_cmake` takes a build type (`Debug`, `Release`, `RelWithDebInfo`), `-G <generator>` and `-D` options, and `build_meson` a build directory and `-D` options.
 
 ### Windows (native) — MSVC or MinGW
 

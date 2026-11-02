@@ -264,10 +264,13 @@ static int8_t cmd_longline(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
   (void)cmd;
   (void)argc;
   (void)argv;
-  for (int i = 0; i < 15; i++) {
-    cli_print(cli, "%s",
-              "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-              "xxxxxxxxxxxxxxxxxxxx"); /* 100 characters */
+  /* 1500 characters without a newline, each cli_print() within the format buffer. */
+  static const char x100[] =
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      "xxxxxxxxxxxxxxxxxxxx";
+  int piece = (CLI_MAX_OUTPUT_BUF - 1 < 100) ? CLI_MAX_OUTPUT_BUF - 1 : 100;
+  for (int left = 1500; left > 0; left -= piece) {
+    cli_print(cli, "%.*s", (left < piece) ? left : piece, x100);
   }
   cli_println(cli, "");
   return CLI_OK;
@@ -1229,7 +1232,7 @@ static void test_output_line_handling(void) {
   type("longline\r");
   cli_set_print_transport_cb(&s_cli, NULL);
   ASSERT_EQ(s_transport_chars, 1500);
-  ASSERT_EQ(s_transport_lines, 2);
+  ASSERT_EQ(s_transport_lines, (1500 + CLI_MAX_OUTPUT_BUF - 2) / (CLI_MAX_OUTPUT_BUF - 1));
 #endif
   TEST_END();
 }
@@ -2163,6 +2166,269 @@ static void test_enable_callback_relogin(void) {
 }
 #endif
 
+/* Round 8 regressions ------------------------------------------------------------------*/
+
+static size_t s_flushed_len; /* s_out_len at the last transport flush */
+
+static cli_transport_ret_t t_flush(void *ctx) {
+  (void)ctx;
+  s_flushed_len = s_out_len;
+  return 0;
+}
+
+static void test_output_flushed_every_tick(void) {
+  TEST_START("output_flushed_every_tick");
+  session_new();
+  s_cli.transport.flush = t_flush;
+  s_flushed_len = 0;
+  session_start();
+
+  type("hel"); /* echo only: no prompt follows */
+  ASSERT_EQ(s_flushed_len, s_out_len);
+#if CLI_ENABLE_TAB_COMPLETION
+  type("\t");
+  ASSERT_OUT("p ");
+  ASSERT_EQ(s_flushed_len, s_out_len);
+#endif
+  type("\r");
+  out_clear();
+  s_flushed_len = 0;
+  (void)cli_exec(&s_cli, "echo x"); /* from the main loop, outside any tick */
+  ASSERT_OUT("ARGS [x]");
+  ASSERT_EQ(s_flushed_len, s_out_len);
+  TEST_END();
+}
+
+static int8_t cmd_bye(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  cli_print(cli, "line one\n");
+  cli_print(cli, "Goodbye"); /* no newline: the command's output ends it */
+  cli_restart_session(cli);
+  return CLI_OK;
+}
+
+static void test_restart_keeps_command_output(void) {
+  TEST_START("restart_keeps_command_output");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "bye", cmd_bye, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  session_start();
+
+  type("bye\r");
+  ASSERT_OUT("line one\r\nGoodbye\r\n");
+#if CLI_ENABLE_PIPE_FILTER
+  out_clear();
+  type("bye | count\r");
+  ASSERT_OUT("Count: 2");
+  out_clear();
+  type("bye | include Good\r");
+  ASSERT_OUT("Goodbye\r\n");
+  ASSERT_NOT_OUT("line one");
+#endif
+
+  /* Outside any command the new session starts below the line being typed. */
+  type("sho");
+  out_clear();
+  cli_restart_session(&s_cli);
+  (void)run();
+  ASSERT_TRUE(strncmp(s_out, "\r\n", 2) == 0);
+  ASSERT_OUT("rtr> ");
+  TEST_END();
+}
+
+static int8_t cmd_logout(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                         const char *argv[]) {
+  (void)cli;
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  return CLI_ERR_QUIT; /* ends the session */
+}
+
+static void test_exec_quit_ends_session(void) {
+  TEST_START("exec_quit_ends_session");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "logout", cmd_logout, CLI_PRIV_USER, CLI_MODE_ANY,
+                        "");
+  session_start();
+
+  ASSERT_EQ(cli_exec(&s_cli, "logout"), CLI_ERR_QUIT);
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_STOP);
+  ASSERT_NOT_OUT("rtr> ");
+  ASSERT_EQ(cli_session_engine(&s_cli), CLI_ERR_QUIT);
+  TEST_END();
+}
+
+static int8_t cmd_su(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  cli_set_privilege(cli, (cli_priv_t)15);
+  return CLI_OK;
+}
+
+static void test_enable_keeps_higher_privilege(void) {
+  TEST_START("enable_keeps_higher_privilege");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "su", cmd_su, CLI_PRIV_USER, CLI_MODE_EXEC, "");
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "admin", cmd_name, (cli_priv_t)15, CLI_MODE_ANY, "");
+  session_start();
+
+  type("su\renable\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), (cli_priv_t)15);
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_ENABLE);
+  out_clear();
+  type("admin\r");
+  ASSERT_OUT("RAN:admin");
+  TEST_END();
+}
+
+#if CLI_ENABLE_AUTH
+static int8_t restart_cb(cli_struct_t *cli, const char *user, const char *pass) {
+  (void)user;
+  (void)pass;
+  cli_restart_session(cli);
+  return CLI_ERR_AUTH;
+}
+
+static int8_t login_relogin_cb(cli_struct_t *cli, const char *user, const char *pass) {
+  (void)user;
+  (void)pass;
+  cli_request_auth(cli); /* asks for a new login instead of granting this one */
+  return CLI_OK;
+}
+
+static void test_credential_callback_restart(void) {
+  TEST_START("credential_callback_restart");
+  session_new();
+  cli_set_enable_privilege_cb(&s_cli, restart_cb);
+  session_start();
+
+  type("enable\rx\r");
+  ASSERT_EQ(out_count("rtr> "), 1); /* only the new session's prompt */
+  ASSERT_NOT_OUT("Access denied");
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_RUN);
+
+  session_new();
+  cli_require_authorization(&s_cli, true);
+  cli_set_authorization_cb(&s_cli, restart_cb);
+  session_start();
+  type("admin\rpw\r");
+  ASSERT_EQ(out_count("Username: "), 1);
+  ASSERT_NOT_OUT("Authentication failed");
+  ASSERT_EQ(s_cli.auth_attempts, 0);
+
+  session_new();
+  cli_require_authorization(&s_cli, true);
+  cli_set_authorization_cb(&s_cli, login_relogin_cb);
+  session_start();
+  type("admin\rpw\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  ASSERT_EQ(out_count("Username: "), 1);
+  ASSERT_NOT_OUT("rtr> ");
+  TEST_END();
+}
+#endif
+
+static int8_t cmd_nop(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
+  (void)cli;
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  return CLI_OK;
+}
+
+#if CLI_ENABLE_PRINT_TRANSPORT_CB
+static char s_lines[256];
+
+static void t_line(cli_struct_t *cli, const char *line) {
+  (void)cli;
+  size_t len = strlen(s_lines);
+  (void)snprintf(&s_lines[len], sizeof(s_lines) - len, "<%s>", line);
+}
+#endif
+
+static void test_async_partial_line_kept_apart(void) {
+  TEST_START("async_partial_line_kept_apart");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "nop", cmd_nop, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  session_start();
+
+  (void)cli_print(&s_cli, "[tick]"); /* outside any command, e.g. from a callback */
+  type("nop\r");
+  ASSERT_NOT_OUT("\r\n\r\n");
+  ASSERT_OUT("[tick]nop\r\nrtr> ");
+
+#if CLI_ENABLE_PRINT_TRANSPORT_CB
+  s_lines[0] = '\0';
+  cli_set_print_transport_cb(&s_cli, t_line);
+  (void)cli_print(&s_cli, "[tick]");
+  type("echo hi\r");
+  ASSERT_STR_EQ(s_lines, "<[tick]><ARGS [hi]>");
+#endif
+  TEST_END();
+}
+
+#if CLI_ENABLE_HISTORY
+static void test_history_lists_whole_entries(void) {
+  /* Longest line that fits next to the 'history' command itself. */
+  enum {
+    ENTRY_LEN = (CLI_MAX_INPUT_LEN - 1 < CLI_HISTORY_BUF_SIZE - 9) ? CLI_MAX_INPUT_LEN - 1
+                                                                   : CLI_HISTORY_BUF_SIZE - 9
+  };
+  static char entry[ENTRY_LEN + 2];
+
+  TEST_START("history_lists_whole_entries");
+  session_new();
+  session_start();
+
+  memset(entry, 'a', ENTRY_LEN);
+  entry[0] = 'x';
+  entry[1] = ' ';
+  entry[ENTRY_LEN] = '\r';
+  entry[ENTRY_LEN + 1] = '\0';
+  type(entry);
+  out_clear();
+  type("history\r");
+  entry[ENTRY_LEN] = '\0';
+  ASSERT_OUT(entry); /* not cut at CLI_MAX_OUTPUT_BUF */
+  TEST_END();
+}
+#endif
+
+static void test_print_contracts(void) {
+  TEST_START("print_contracts");
+  session_new();
+  session_start();
+
+  ASSERT_EQ(cli_println(&s_cli, "abc"), 5); /* includes the \r\n */
+  ASSERT_EQ(s_out_len, 5U);
+#if CLI_ENABLE_PRINT_TRANSPORT_CB
+  s_lines[0] = '\0';
+  cli_set_print_transport_cb(&s_cli, t_line);
+  type("warn\r");
+  ASSERT_STR_EQ(s_lines, "<partial><% bad thing>");
+#endif
+  TEST_END();
+}
+
+#if CLI_ENABLE_ALIASES
+static void test_duplicate_of_submenu_rejected(void) {
+  cli_cmd_handle_t leaf;
+
+  TEST_START("duplicate_of_submenu_rejected");
+  session_new();
+  ASSERT_EQ(cli_add_command_duplicate(&s_cli, s_h_show, "sh2"), CLI_CMD_INVALID);
+  leaf = cli_add_command(&s_cli, CLI_CMD_ROOT, "ping", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  ASSERT_TRUE(cli_add_command_duplicate(&s_cli, leaf, "pong") >= 0);
+  session_start();
+  type("pong\r");
+  ASSERT_OUT("RAN:pong"); /* the duplicate's handler is called with its own name */
+  TEST_END();
+}
+#endif
+
 static void test_null_safety(void) {
   TEST_START("null_safety");
   session_new();
@@ -2323,6 +2589,21 @@ int main(void) {
   RUN_SUITE(test_unusable_container_hidden);
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_enable_callback_relogin);
+#endif
+  RUN_SUITE(test_output_flushed_every_tick);
+  RUN_SUITE(test_restart_keeps_command_output);
+  RUN_SUITE(test_exec_quit_ends_session);
+  RUN_SUITE(test_enable_keeps_higher_privilege);
+#if CLI_ENABLE_AUTH
+  RUN_SUITE(test_credential_callback_restart);
+#endif
+  RUN_SUITE(test_async_partial_line_kept_apart);
+#if CLI_ENABLE_HISTORY
+  RUN_SUITE(test_history_lists_whole_entries);
+#endif
+  RUN_SUITE(test_print_contracts);
+#if CLI_ENABLE_ALIASES
+  RUN_SUITE(test_duplicate_of_submenu_rejected);
 #endif
 
   printf("\n--- robustness ---\n");

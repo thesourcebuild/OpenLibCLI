@@ -15,8 +15,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 
-$buildDir = "build\cmake"
+# Always the project's own build tree, wherever the script is run from.
+$buildDir = Join-Path $ProjectRoot "build\cmake"
 $generator = $null
 $buildType = "Release"
 $cmakeOpts = @()
@@ -36,7 +38,7 @@ function Show-Help {
     Write-Host "    BUILD_EXAMPLE_*=1|0  Pass through as -D option"
     Write-Host "    -D<var>=<val>     Pass through as CMake -D flag"
     Write-Host
-    Write-Host "  Output: $buildDir\windows\"
+    Write-Host "  Output: build\cmake\windows\"
     Write-Host
 }
 
@@ -87,6 +89,12 @@ while ($i -lt $args.Count) {
         continue
     }
 
+    # CMake options only: a bare word (e.g. a make target such as "clean") would be taken
+    # by CMake as a source path and ignored with a warning, and a full build would follow.
+    if ($a -notmatch '^-') {
+        Write-Host "[build_cmake] Error: unknown argument '$a' (see 'help')."
+        exit 1
+    }
     $cmakeOpts += $a
     $i++
 }
@@ -121,7 +129,7 @@ Write-Host "[build_cmake] Configuring (BUILD_TYPE=$buildType)..."
 if ($cmakeOpts.Count -gt 0 -and ($cmakeOpts | Where-Object { $_ -match '^-DBUILD_EXAMPLE_' })) {
     Write-Host "[build_cmake] Options: $(($cmakeOpts | Where-Object { $_ -match '^-DBUILD_EXAMPLE_' }) -join ' ')"
 }
-$configureArgs = @("-B", $buildDir) + $genArg + @("-DCMAKE_BUILD_TYPE=$buildType") + $cmakeOpts
+$configureArgs = @("-S", $ProjectRoot, "-B", $buildDir) + $genArg + @("-DCMAKE_BUILD_TYPE=$buildType") + $cmakeOpts
 & cmake $configureArgs
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
@@ -135,18 +143,18 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 # --------------------------------------------------------------------------
 #  Copy DLL to libs\ as well
 # --------------------------------------------------------------------------
-$rootDir = Get-Location
-$dllPath = if (Test-Path "$rootDir\$buildDir\windows\binaries\OpenLibCLI.dll") {
-    "$rootDir\$buildDir\windows\binaries\OpenLibCLI.dll"
-} elseif (Test-Path "$rootDir\$buildDir\windows\binaries\libopenlibcli.dll") {
-    "$rootDir\$buildDir\windows\binaries\libopenlibcli.dll"
+$outDir = Join-Path $buildDir "windows"
+$dllPath = if (Test-Path "$outDir\binaries\OpenLibCLI.dll") {
+    "$outDir\binaries\OpenLibCLI.dll"
+} elseif (Test-Path "$outDir\binaries\libopenlibcli.dll") {
+    "$outDir\binaries\libopenlibcli.dll"
 } else { $null }
 if ($dllPath) {
-    $libsDir = "$rootDir\$buildDir\windows\libs"
+    $libsDir = "$outDir\libs"
     if (-not (Test-Path $libsDir)) { New-Item -ItemType Directory -Path $libsDir -Force | Out-Null }
     Copy-Item -Path $dllPath -Destination "$libsDir\" -Force
     Write-Host "[build_cmake] Copied $(Split-Path -Leaf $dllPath) to libs\"
 }
 
 Write-Host "[build_cmake] Done."
-Write-Host "  Output dir : $buildDir\windows"
+Write-Host "  Output dir : $outDir"

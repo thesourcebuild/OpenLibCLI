@@ -105,7 +105,9 @@ done
 # ---------------------------------------------------------------------------
 BACKEND=""
 if ! command -v ninja &>/dev/null; then
-    warn "ninja not found - trying default backend"
+    # Ninja is Meson's only backend on Linux (macOS also has Xcode, which cannot install the
+    # layout used here): without it meson setup fails.
+    die "ninja not found - install ninja (e.g. the ninja-build package)"
 fi
 
 # ---------------------------------------------------------------------------

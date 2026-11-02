@@ -393,7 +393,8 @@ typedef struct {
  * @brief Command handler callback.
  *
  * @param[in] cli   The CLI session that invoked the command.
- * @param[in] cmd   The full command string as typed (before tokenisation).
+ * @param[in] cmd   Registered name of the command being run (the word as typed, which may be
+ *                  an abbreviation or an alias, is @p argv[0]).
  * @param[in] argc  Number of tokens (@p argv[0] is the leaf command word).
  * @param[in] argv  NULL-terminated token array.
  *
@@ -863,6 +864,7 @@ struct cli_s {
 
   bool ansi_supported; /**< Terminal supports ANSI/VT100 escape sequences (default true). */
   bool tx_error;       /**< A transport write failed; the session ends on the next tick. */
+  bool tx_unflushed;   /**< Bytes were written since the last transport flush. */
 
   /* --- arbitrary user payload
    * ------------------------------------------------------ */
@@ -1393,7 +1395,11 @@ OPENLIBCLI_API cli_cmd_handle_t cli_add_command(cli_struct_t *cli, cli_cmd_handl
  * cli_add_command call.
  * @param[in] alias_name  New keyword for the alias (no spaces, no @c ?).
  *
- * @return A handle for the alias node, or @c CLI_CMD_INVALID on error.
+ * Sub-commands are not copied, so a command that has any cannot be duplicated (it
+ * would be reachable without them); give it a name with @c cli_cmd_add_alias instead.
+ *
+ * @return A handle for the alias node, or @c CLI_CMD_INVALID on error (also when
+ *         @p original has sub-commands).
  */
 OPENLIBCLI_API cli_cmd_handle_t cli_add_command_duplicate(cli_struct_t *cli,
                                                           cli_cmd_handle_t original,
@@ -1701,9 +1707,9 @@ OPENLIBCLI_API int cli_println_p(cli_struct_t *cli, const char *fmt, ...);
 /**
  * @brief Print an error line that bypasses the active pipe filter.
  *
- * Formats the message with a @c "% " IOS-style prefix and always delivers it
- * to the transport (or @c print_transport_cb), regardless of the current pipe filter
- * state.
+ * Formats the message with a @c "% " IOS-style prefix and always delivers that line
+ * to the transport (or, when set, to @c print_transport_cb), regardless of the current pipe
+ * filter state. The message is limited to @c CLI_MAX_OUTPUT_BUF - 3 characters.
  *
  * When either @c print_cb or @c print_cb_v is set, all internal processing
  * is bypassed and the formatted text (or raw fmt+va_list) is forwarded to

@@ -19,7 +19,7 @@ if python_inst.found()
   if gen_result.returncode() != 0
     message('gen_version_header: ' + gen_result.stderr().strip())
   else
-    message('gen_version_header: regenerated cli/cli_version.h')
+    message(gen_result.stdout().strip().split('\n')[0])
   endif
 endif
 

@@ -1,5 +1,5 @@
 [wrap-git]
-url      = https://github.com/OpenLibCLI/libcli-perfecto.git
+url      = https://github.com/thesourcebuild/OpenLibCLI.git
 revision = v@CLI_VERSION@
 depth    = 1
 

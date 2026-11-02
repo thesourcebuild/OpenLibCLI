@@ -15,6 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 
 # --------------------------------------------------------------------------
 #  Parse arguments: separate BUILD_EXAMPLE_* vars from positional args
@@ -68,10 +69,14 @@ while ($i -lt $args.Count) {
     $i++
 }
 
-# First positional arg is build directory (override default)
+# First positional arg is build directory (override default), relative to where the script
+# was run; the default is relative to the project root.
 if ($remaining.Count -gt 0) {
-    $buildDir = $remaining[0]
+    # Combine() keeps an absolute path as given and resolves a relative one.
+    $buildDir = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine((Get-Location).Path, $remaining[0]))
     $remaining = $remaining[1..($remaining.Count - 1)]
+} else {
+    $buildDir = Join-Path $ProjectRoot $buildDir
 }
 if ($remaining.Count -gt 0) {
     Write-Host "[build_meson] Warning: unknown arguments ignored: $($remaining -join ' ')"
@@ -97,12 +102,21 @@ if ($mesonOpts.Count -gt 0) {
 }
 $hasBuildInfo = Test-Path (Join-Path $buildDir "meson-info")
 if ($hasBuildInfo) {
-    $setupArgs = @("setup", $buildDir, "--wipe") + $(if ($backend) { @($backend) } else { @() }) + @("--prefix", "/windows", "--bindir", "binaries", "--libdir", "libs") + $mesonOpts
+    $setupArgs = @("setup", $buildDir, $ProjectRoot, "--wipe") + $(if ($backend) { @($backend) } else { @() }) + @("--prefix", "/windows", "--bindir", "binaries", "--libdir", "libs") + $mesonOpts
 } else {
-    # Delete any stale partial directory, then create fresh
-    if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
+    if (Test-Path $buildDir) {
+        # Only what a failed setup leaves (meson-logs, meson-private) is removed; any other
+        # content is not a Meson build and is never deleted.
+        $foreign = @(Get-ChildItem -Force -LiteralPath $buildDir | Where-Object { $_.Name -notlike "meson-*" })
+        if ($foreign.Count -gt 0) {
+            Write-Host "[build_meson] Error: $buildDir is not a Meson build directory (it contains $($foreign[0].Name))."
+            Write-Host "[build_meson]        Pass a new or empty directory."
+            exit 1
+        }
+        Remove-Item -Recurse -Force -LiteralPath $buildDir
+    }
     New-Item -ItemType Directory -Path $buildDir | Out-Null
-    $setupArgs = @("setup", $buildDir) + $(if ($backend) { @($backend) } else { @() }) + @("--prefix", "/windows", "--bindir", "binaries", "--libdir", "libs") + $mesonOpts
+    $setupArgs = @("setup", $buildDir, $ProjectRoot) + $(if ($backend) { @($backend) } else { @() }) + @("--prefix", "/windows", "--bindir", "binaries", "--libdir", "libs") + $mesonOpts
 }
 & meson $setupArgs
 if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -118,7 +132,7 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 #  Install
 # --------------------------------------------------------------------------
 Write-Host "[build_meson] Installing to build\meson\windows\..."
-$rootDir = Get-Location
+$rootDir = $ProjectRoot
 & meson install -C $buildDir --destdir "$rootDir\build\meson" 2>&1
 if ($LASTEXITCODE -ne 0) { exit 1 }
 

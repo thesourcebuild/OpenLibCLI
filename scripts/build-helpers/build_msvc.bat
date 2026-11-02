@@ -147,7 +147,7 @@ echo.
 echo  Usage: scripts\build-helpers\build_msvc.bat [target] [BUILD_EXAMPLE_*=0^|1 ...]
 echo.
 echo  Targets:
-echo    (none)        Build static + shared libraries and examples  [default]
+echo    (none)        Build the shared library and examples  [default; BUILD_LIB_STATIC=1 adds the static library]
 echo    lib           Static library only
 echo    shared        Shared library only
 echo    telnet        Telnet server  (build\msvc\windows\binaries\cli_server_telnet.exe)

@@ -99,9 +99,14 @@ while [ $# -gt 0 ]; do
                 shift
             fi
             ;;
-        *)
+        -*)
             CMAKE_OPTS+=("$1")
             shift
+            ;;
+        *)
+            # A bare word (e.g. a make target such as "clean") would be taken by CMake as a
+            # source path and ignored with a warning, and a full build would follow.
+            die "unknown argument '$1' (see 'help')"
             ;;
     esac
 done

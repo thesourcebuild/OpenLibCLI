@@ -32,7 +32,7 @@ function Show-Help {
     Write-Host "  Usage: scripts\build-helpers\build_mingw_gcc.ps1 [target] [BUILD_EXAMPLE_*=0|1 ...]"
     Write-Host
     Write-Host "  Targets:"
-    Write-Host "    (none)        Build static + shared libraries and examples  [default]"
+    Write-Host "    (none)        Build the shared library and examples  [default; BUILD_LIB_STATIC=1 adds the static library]"
     Write-Host "    lib           Static library only"
     Write-Host "    shared        Shared library only"
     Write-Host "    telnet        Telnet server  (build\gcc\windows\binaries\cli_server_telnet.exe)"
