@@ -245,6 +245,10 @@ static void cli_flush(cli_struct_t *cli);
 
 static void cli_touch_activity_internal(cli_struct_t *cli);
 static void cli_idle_period_restart(cli_struct_t *cli);
+#if CLI_ENABLE_TIME_SOURCE &&                                                                      \
+    (CLI_ENABLE_IDLE_TIMEOUT || CLI_ENABLE_PERIODIC_CALLBACK || CLI_ENABLE_AUTH)
+static uint32_t cli_rebase_ts(uint32_t ts, bool had_clock, uint32_t old_now, uint32_t new_now);
+#endif
 #if CLI_ENABLE_TIME_SOURCE && ENV_IS_OS_ENVIRONMENT
 static uint32_t cli_default_time_source(void *ctx);
 #endif
@@ -431,6 +435,7 @@ static bool cli_state_is_auth_input(const cli_struct_t *cli);
 static void cli_auth_reset_work(cli_struct_t *cli);
 static void cli_auth_prompt_username(cli_struct_t *cli);
 static bool cli_auth_lockout_expired(const cli_struct_t *cli);
+static bool cli_auth_lockout_unending(const cli_struct_t *cli);
 static void cli_auth_lockout_end(cli_struct_t *cli);
 static int8_t cli_auth_limit_reached(cli_struct_t *cli, cli_auth_state_enum_t resume_state);
 static int8_t cli_auth_verify(cli_struct_t *cli);
@@ -974,8 +979,19 @@ OPENLIBCLI_API int8_t cli_session_engine(cli_struct_t *cli) {
     }
 
 #if CLI_ENABLE_AUTH
-    if (active && cli->auth_state == CLI_AUTH_LOCKOUT && cli_auth_lockout_expired(cli)) {
-      cli_auth_lockout_end(cli);
+    if (active && cli->auth_state == CLI_AUTH_LOCKOUT) {
+      if (cli_auth_lockout_unending(cli)) {
+        /* The clock was removed during a timed lockout, which can then never end: close the
+         * session, as cli_auth_limit_reached() does when a lockout would start without one. */
+        CLI_WSTR(cli, "% Too many failed attempts. Closing Session.\r\n");
+        cli->session_state = CLI_SESSION_STOP;
+        result = CLI_ERR_AUTH;
+        active = False;
+      } else if (cli_auth_lockout_expired(cli)) {
+        cli_auth_lockout_end(cli);
+      } else {
+        /* Still locked out. */
+      }
     }
 #endif
 
@@ -1365,27 +1381,29 @@ OPENLIBCLI_API int8_t cli_set_mode_name(cli_struct_t *cli, cli_mode_t mode, cons
 OPENLIBCLI_API void cli_set_time_source(cli_struct_t *cli, cli_time_fn fn, void *ctx) {
 #if CLI_ENABLE_TIME_SOURCE
   if (cli != NULL) {
-#if CLI_ENABLE_PERIODIC_CALLBACK || CLI_ENABLE_AUTH
+#if CLI_ENABLE_IDLE_TIMEOUT || CLI_ENABLE_PERIODIC_CALLBACK || CLI_ENABLE_AUTH
     /* Timestamps taken from the old clock mean nothing on the new one. A running period
-     * (periodic interval, login lockout) keeps the time it has already run and continues
-     * from now on the new clock; without an old clock it starts now. */
+     * (idle time, periodic interval, login lockout) keeps the time it has already run and
+     * continues from now on the new clock; without an old clock it starts now. */
     bool had_clock = (cli->time_source != NULL);
     uint32_t old_now = had_clock ? cli->time_source(cli->time_source_ctx) : 0U;
     uint32_t new_now = (fn != NULL) ? fn(ctx) : 0U;
 
+#if CLI_ENABLE_IDLE_TIMEOUT
+    cli->last_action_ts = cli_rebase_ts(cli->last_action_ts, had_clock, old_now, new_now);
+#endif
 #if CLI_ENABLE_PERIODIC_CALLBACK
-    cli->last_periodic_ts = had_clock ? new_now - (old_now - cli->last_periodic_ts) : new_now;
+    cli->last_periodic_ts = cli_rebase_ts(cli->last_periodic_ts, had_clock, old_now, new_now);
 #endif
 #if CLI_ENABLE_AUTH
     if (cli->auth_state == CLI_AUTH_LOCKOUT) {
       cli->auth_lockout_started_ts =
-          had_clock ? new_now - (old_now - cli->auth_lockout_started_ts) : new_now;
+          cli_rebase_ts(cli->auth_lockout_started_ts, had_clock, old_now, new_now);
     }
 #endif
 #endif
     cli->time_source = fn;
     cli->time_source_ctx = ctx;
-    cli_idle_period_restart(cli);
   }
 #else
   (void)cli;
@@ -2567,6 +2585,23 @@ static void cli_touch_activity_internal(cli_struct_t *cli) {
  * @brief Start a new idle period without counting it as user activity.
  * @param[in] cli  Active CLI session.
  */
+#if CLI_ENABLE_TIME_SOURCE &&                                                                      \
+    (CLI_ENABLE_IDLE_TIMEOUT || CLI_ENABLE_PERIODIC_CALLBACK || CLI_ENABLE_AUTH)
+/**
+ * @brief Move a timestamp from one clock to another, keeping the time elapsed since it.
+ *
+ * @param[in] ts         Timestamp on the old clock.
+ * @param[in] had_clock  @c false when there was no old clock (the period starts now).
+ * @param[in] old_now    Current reading of the old clock.
+ * @param[in] new_now    Current reading of the new clock.
+ *
+ * @return The timestamp on the new clock.
+ */
+static uint32_t cli_rebase_ts(uint32_t ts, bool had_clock, uint32_t old_now, uint32_t new_now) {
+  return had_clock ? new_now - (old_now - ts) : new_now;
+}
+#endif
+
 static void cli_idle_period_restart(cli_struct_t *cli) {
 #if CLI_ENABLE_IDLE_TIMEOUT && CLI_ENABLE_TIME_SOURCE
   if (cli != NULL && cli->time_source != NULL) {
@@ -3926,12 +3961,34 @@ static cli_cmd_handle_t cli_menu_context_parent(const cli_struct_t *cli) {
  */
 static void cli_tab_complete(cli_struct_t *cli) {
   /* With the cursor inside a word, that whole word is completed: the cursor moves to the
-   * word's end first (as zsh does), so a completion never splits a word. */
-  cli_len_t end = cli->cursor;
-  while (end < cli->input_len && cli->input[end] != ' ' && cli->input[end] != '\t') {
-    end++;
+   * word's end first (as zsh does), so a completion never splits a word. A word ends where
+   * the tokenizer ends it: at a space or an unquoted '|'; a quoted part belongs to it. Inside
+   * an open quote there is no word to complete, and the cursor stays. */
+  if (!cli_quote_open(cli->input, cli->cursor)) {
+    cli_len_t end = cli->cursor;
+    bool in_quote = False;
+    bool word_end = False;
+
+    while (end < cli->input_len && !word_end) {
+      char c = cli->input[end];
+      bool separator = (c == ' ' || c == '\t');
+#if CLI_ENABLE_PIPE_FILTER
+      separator = separator || (c == ASCII_PIPE);
+#endif
+      if (in_quote && c == '\\' && end + 1 < cli->input_len &&
+          (cli->input[end + 1] == '"' || cli->input[end + 1] == '\\')) {
+        end += 2; /* escaped character inside quotes */
+      } else if (!in_quote && separator) {
+        word_end = True;
+      } else {
+        if (c == '"') {
+          in_quote = !in_quote;
+        }
+        end++;
+      }
+    }
+    cli_move_cursor(cli, end);
   }
-  cli_move_cursor(cli, end);
 
   /* Complete the word that ends at the cursor: only the text before it counts. */
   char scratch[CLI_MAX_INPUT_LEN];
@@ -3996,10 +4053,22 @@ static void cli_tab_complete_words(cli_struct_t *cli, char *scratch) {
     cli_len_t common = cc.common;
     cli_len_t partial_len = (cli_len_t)strlen(partial);
 
+    /* Characters the completion adds (the same when it rewrites the typed case): it is made
+     * in full or not at all, never cut at CLI_MAX_INPUT_LEN. */
+    cli_len_t grow = 0;
+    if (count == 1) {
+      grow = (cli_len_t)strlen(first_text) - partial_len + 1; /* + the space after it */
+    } else if (count > 1 && common > partial_len) {
+      grow = common - partial_len;
+    } else {
+      /* Nothing is inserted. */
+    }
+    bool fits = (grow <= (cli_len_t)CLI_MAX_INPUT_LEN - 1 - cli->input_len);
+
     /* Keyword characters already typed. A plainly typed word (no quotes) whose case
      * differs from the keyword ("SH" for "show") is rewritten in the keyword's case. */
     cli_len_t keep = partial_len;
-    if (count > 0 && (count == 1 || common > partial_len) && cli->cursor >= partial_len &&
+    if (fits && count > 0 && (count == 1 || common > partial_len) && cli->cursor >= partial_len &&
         memcmp(&cli->input[cli->cursor - partial_len], partial, (size_t)partial_len) == 0 &&
         strncmp(first_text, partial, (size_t)partial_len) != 0) {
       for (cli_len_t i = 0; i < partial_len; i++) {
@@ -4008,8 +4077,8 @@ static void cli_tab_complete_words(cli_struct_t *cli, char *scratch) {
       keep = 0;
     }
 
-    if (count == 0) {
-      cli_write_char(cli, '\a');
+    if (count == 0 || !fits) {
+      cli_write_char(cli, '\a'); /* no match, or the completion does not fit on the line */
     } else if (count == 1) {
       /* Unique match — complete the word and start the next one */
       for (cli_len_t i = keep; first_text[i] != '\0'; i++) {
@@ -4079,7 +4148,11 @@ static void cli_show_help(cli_struct_t *cli) {
   (void)cli_strlcpy(scratch, cli->input, CLI_MAX_INPUT_LEN);
   scratch[cli->cursor] = '\0';
 
-  /* Echo the '?' so the help request is visible on the edited line. */
+  /* Echo the '?' after the line, so the help request is visible on it without covering the
+   * text after the cursor. The help follows on new lines, and the line is then redrawn with
+   * the cursor where it was. */
+  cli_raw_write(cli, (const uint8_t *)&cli->input[cli->cursor],
+                (cli_transport_buflen_t)(cli->input_len - cli->cursor));
   cli_write_char(cli, '?');
 
 #if CLI_ENABLE_PIPE_FILTER
@@ -4451,12 +4524,17 @@ static void cli_filter_tab_complete(cli_struct_t *cli, char *tail) {
       }
     }
 
-    if (count == 0U) {
-      cli_write_char(cli, '\a');
+    /* Characters the completion adds (the same when it rewrites the typed case): made in
+     * full or not at all. */
+    size_t stop = (count == 1U) ? strlen(s_filter_keywords[first].keyword) : common;
+    size_t grow = (count == 1U) ? stop - kw_len + 1U : ((stop > kw_len) ? stop - kw_len : 0U);
+    bool fits = (grow <= (size_t)((cli_len_t)CLI_MAX_INPUT_LEN - 1 - cli->input_len));
+
+    if (count == 0U || !fits) {
+      cli_write_char(cli, '\a'); /* no match, or the completion does not fit on the line */
     } else if (count == 1U || common > kw_len) {
       const char *name = s_filter_keywords[first].keyword;
       size_t keep = kw_len;
-      size_t stop = (count == 1U) ? strlen(name) : common;
 
       /* Typed in another case ("INC"): rewritten in the keyword's case, as commands are. */
       if (strncmp(name, kw, kw_len) != 0) {
@@ -5003,12 +5081,26 @@ static void cli_auth_prompt_username(cli_struct_t *cli) {
  * @param[in] cli  Active CLI session.
  * @return @c true if the lockout has expired or is not active.
  */
+/**
+ * @brief Test whether the current lockout is timed but has no clock to time it.
+ * @param[in] cli  Active CLI session.
+ * @return @c true when the lockout could never expire.
+ */
+static bool cli_auth_lockout_unending(const cli_struct_t *cli) {
+#if CLI_ENABLE_TIME_SOURCE
+  return (cli->auth_lockout_seconds != 0UL && cli->time_source == NULL);
+#else
+  return (cli->auth_lockout_seconds != 0UL);
+#endif
+}
+
 static bool cli_auth_lockout_expired(const cli_struct_t *cli) {
   bool expired = True;
 
   if (cli != NULL && cli->auth_lockout_seconds != 0UL) {
 #if CLI_ENABLE_TIME_SOURCE
-    /* cli_auth_limit_reached() only locks out when a time source exists. */
+    /* A timed lockout only exists with a clock (cli_auth_limit_reached(); the engine closes
+     * the session when the clock is removed during one). */
     if (cli->time_source != NULL) {
       uint32_t now = cli->time_source(cli->time_source_ctx);
       uint32_t elapsed = now - cli->auth_lockout_started_ts;

@@ -1150,6 +1150,11 @@ OPENLIBCLI_API int8_t cli_set_mode_name(cli_struct_t *cli, cli_mode_t mode, cons
  * available. Bare-metal targets should pass @c cli_platform_struct_t.now_sec to
  * @c cli_init().
  *
+ * Running periods (idle time, periodic interval, a login lockout) keep the time they have
+ * already run and continue on the new clock. A timed lockout cannot end without a clock:
+ * removing the clock (@p fn = NULL) during one closes the session, as when the lockout
+ * would start without a clock.
+ *
  * @param[in] cli  Active CLI session.
  * @param[in] fn   Time source callback.
  * @param[in] ctx  Opaque context passed to @p fn.

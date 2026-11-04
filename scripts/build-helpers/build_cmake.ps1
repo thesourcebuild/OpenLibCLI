@@ -144,17 +144,18 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 #  Copy DLL to libs\ as well
 # --------------------------------------------------------------------------
 $outDir = Join-Path $buildDir "windows"
-$dllPath = if (Test-Path "$outDir\binaries\OpenLibCLI.dll") {
-    "$outDir\binaries\OpenLibCLI.dll"
-} elseif (Test-Path "$outDir\binaries\libopenlibcli.dll") {
-    "$outDir\binaries\libopenlibcli.dll"
-} else { $null }
-if ($dllPath) {
-    $libsDir = "$outDir\libs"
-    if (-not (Test-Path $libsDir)) { New-Item -ItemType Directory -Path $libsDir -Force | Out-Null }
-    Copy-Item -Path $dllPath -Destination "$libsDir\" -Force
-    Write-Host "[build_cmake] Copied $(Split-Path -Leaf $dllPath) to libs\"
+# The DLL this build made, as CMake records it (MSVC and MinGW name it differently): a DLL
+# another toolchain left in the same tree is never copied instead.
+$sharedFile = Join-Path $buildDir "openlibcli_shared_$buildType.txt"
+if (-not (Test-Path $sharedFile)) {
+    Write-Host "[build_cmake] Error: $sharedFile was not generated."
+    exit 1
 }
+$dllPath = (Get-Content -Raw $sharedFile).Trim()
+$libsDir = "$outDir\libs"
+if (-not (Test-Path $libsDir)) { New-Item -ItemType Directory -Path $libsDir -Force | Out-Null }
+Copy-Item -Path $dllPath -Destination "$libsDir\" -Force
+Write-Host "[build_cmake] Copied $(Split-Path -Leaf $dllPath) to libs\"
 
 Write-Host "[build_cmake] Done."
 Write-Host "  Output dir : $outDir"

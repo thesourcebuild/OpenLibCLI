@@ -2630,6 +2630,109 @@ static void test_tab_after_pipe(void) {
 }
 #endif
 
+/* Round 10 regressions -----------------------------------------------------------------*/
+
+#if CLI_ENABLE_TAB_COMPLETION
+static void test_tab_word_boundaries(void) {
+  static char line[CLI_MAX_INPUT_LEN + 1];
+
+  TEST_START("tab_word_boundaries");
+  session_new();
+  session_start();
+
+#if CLI_ENABLE_PIPE_FILTER
+  /* An unquoted '|' ends the word under the cursor. */
+  type("sh|count");
+  type("\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D"); /* cursor after "sh" */
+  type("\t");
+  ASSERT_STR_EQ(s_cli.input, "show|count");
+  type("\x15");
+#endif
+
+  /* Inside an open quote there is no word to complete: the cursor stays. */
+  type("echo \"abc def\"");
+  type("\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D"); /* cursor after "\"a" */
+  cli_len_t before = s_cli.cursor;
+  type("\t");
+  ASSERT_EQ(s_cli.cursor, before);
+  ASSERT_STR_EQ(s_cli.input, "echo \"abc def\"");
+  type("\x15");
+
+  /* A completion that does not fit is not made at all. */
+  memset(line, ' ', CLI_MAX_INPUT_LEN - 4);
+  line[CLI_MAX_INPUT_LEN - 4] = 'e';
+  line[CLI_MAX_INPUT_LEN - 3] = 'c'; /* one free character left; "echo " needs three */
+  line[CLI_MAX_INPUT_LEN - 2] = '\0';
+  type(line);
+  out_clear();
+  type("\t");
+  ASSERT_STR_EQ(s_cli.input, line);
+  ASSERT_EQ(out_count("\a"), 1);
+  TEST_END();
+}
+#endif
+
+static void test_help_mid_line_echo(void) {
+  TEST_START("help_mid_line_echo");
+  session_new();
+  session_start();
+
+  type("echo");
+  type("\x1b[D\x1b[D"); /* cursor after "ec" */
+  out_clear();
+  type("?");
+  ASSERT_OUT("ho?"); /* the rest of the line, then '?' after it */
+  ASSERT_NOT_OUT("?o");
+  ASSERT_EQ(s_cli.cursor, 2);
+  ASSERT_STR_EQ(s_cli.input, "echo");
+  TEST_END();
+}
+
+#if CLI_ENABLE_AUTH && CLI_ENABLE_TIME_SOURCE
+static void test_lockout_clock_removed(void) {
+  TEST_START("lockout_clock_removed");
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_auth_failure_mode(&s_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
+  cli_set_auth_lockout_duration(&s_cli, 60U);
+  session_start();
+
+  type("x\rx\rx\rx\rx\rx\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  cli_set_time_source(&s_cli, NULL, NULL);
+  out_clear();
+  ASSERT_EQ(type("a"), CLI_ERR_AUTH); /* the timed lockout could never end */
+  ASSERT_OUT("Closing Session");
+  ASSERT_NOT_OUT("Username:");
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_STOP);
+  TEST_END();
+}
+#endif
+
+#if CLI_ENABLE_IDLE_TIMEOUT
+static void test_time_source_change_keeps_idle(void) {
+  TEST_START("time_source_change_keeps_idle");
+  session_new();
+  cli_set_idle_timeout(&s_cli, 10U);
+  cli_set_idle_timeout_mode(&s_cli, CLI_IDLE_TIMEOUT_POLICY_RESET_SESSION);
+  session_start();
+
+  type("ab"); /* activity: the idle period starts */
+  s_now += 9U;
+  (void)run();
+  s_now2 = 500U;
+  cli_set_time_source(&s_cli, t_now2, NULL);
+  out_clear();
+  (void)run();
+  ASSERT_NOT_OUT("Idle timeout");
+  s_now2 += 1U; /* 10 s in all */
+  (void)run();
+  ASSERT_OUT("Idle timeout");
+  TEST_END();
+}
+#endif
+
 static void test_null_safety(void) {
   TEST_START("null_safety");
   session_new();
@@ -2827,6 +2930,16 @@ int main(void) {
 #endif
 #if CLI_ENABLE_PIPE_FILTER && CLI_ENABLE_TAB_COMPLETION
   RUN_SUITE(test_tab_after_pipe);
+#endif
+#if CLI_ENABLE_TAB_COMPLETION
+  RUN_SUITE(test_tab_word_boundaries);
+#endif
+  RUN_SUITE(test_help_mid_line_echo);
+#if CLI_ENABLE_AUTH && CLI_ENABLE_TIME_SOURCE
+  RUN_SUITE(test_lockout_clock_removed);
+#endif
+#if CLI_ENABLE_IDLE_TIMEOUT
+  RUN_SUITE(test_time_source_change_keeps_idle);
 #endif
 
   printf("\n--- robustness ---\n");

@@ -74,7 +74,7 @@ while ($i -lt $args.Count) {
 if ($remaining.Count -gt 0) {
     # Combine() keeps an absolute path as given and resolves a relative one.
     $buildDir = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine((Get-Location).Path, $remaining[0]))
-    $remaining = $remaining[1..($remaining.Count - 1)]
+    $remaining = @($remaining | Select-Object -Skip 1)
 } else {
     $buildDir = Join-Path $ProjectRoot $buildDir
 }
@@ -139,15 +139,17 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 # --------------------------------------------------------------------------
 #  Copy DLL to libs\ as well
 # --------------------------------------------------------------------------
-$dllPath = if (Test-Path "$rootDir\build\meson\windows\binaries\OpenLibCLI.dll") {
-    "$rootDir\build\meson\windows\binaries\OpenLibCLI.dll"
-} elseif (Test-Path "$rootDir\build\meson\windows\binaries\libopenlibcli.dll") {
-    "$rootDir\build\meson\windows\binaries\libopenlibcli.dll"
-} else { $null }
-if ($dllPath) {
-    Copy-Item -Path $dllPath -Destination "$rootDir\build\meson\windows\libs\" -Force
-    Write-Host "[build_meson] Copied $(Split-Path -Leaf $dllPath) to libs\"
+# The DLL this build made, named by Meson itself (MSVC and MinGW name it differently): a DLL
+# another toolchain left in the same tree is never copied instead.
+$targets = & meson introspect $buildDir --targets | ConvertFrom-Json
+$shared = @($targets | Where-Object { $_.type -eq "shared library" -and $_.name -eq "OpenLibCLI" })
+if ($shared.Count -ne 1) {
+    Write-Host "[build_meson] Error: the shared library target was not found in $buildDir."
+    exit 1
 }
+$dllName = Split-Path -Leaf $shared[0].filename[0]
+Copy-Item -Path "$rootDir\build\meson\windows\binaries\$dllName" -Destination "$rootDir\build\meson\windows\libs\" -Force
+Write-Host "[build_meson] Copied $dllName to libs\"
 
 Write-Host "[build_meson] Done."
 Write-Host "  Binaries  : build\meson\windows\binaries"
