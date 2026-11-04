@@ -293,7 +293,18 @@ EMBED_LIB_OBJS  := $(patsubst $(SRC_DIR)/%.c,$(EMBED_OBJ_DIR)/%.o,$(LIB_SRCS))
 
 # Example objects. Compiled for the library they link (CLI_SHARED or not), so each link
 # mode has its own directory: switching BUILD_LIB_SHARED never mixes the two.
-EX_OBJ_DIR := $(OBJ_DIR)/examples-$(if $(filter 1,$(BUILD_LIB_SHARED)),shared,static)
+LINK_MODE       := $(if $(filter 1,$(BUILD_LIB_SHARED)),shared,static)
+LINK_MODE_OTHER := $(if $(filter 1,$(BUILD_LIB_SHARED)),static,shared)
+EX_OBJ_DIR := $(OBJ_DIR)/examples-$(LINK_MODE)
+
+# The executables keep their names in both modes, so the mode they were last linked in is
+# recorded by a marker file: when the other mode's marker exists, this mode's marker is
+# made again (phony, always out of date), which relinks the examples.
+LINK_STAMP       := $(OBJ_DIR)/linked-$(LINK_MODE)
+LINK_STAMP_OTHER := $(OBJ_DIR)/linked-$(LINK_MODE_OTHER)
+ifneq ($(wildcard $(LINK_STAMP_OTHER)),)
+.PHONY: $(LINK_STAMP)
+endif
 ex_objs     = $(patsubst $(EXAMPLE_DIR)/%.c,$(EX_OBJ_DIR)/%.o,$(1))
 DEMO_OBJ        := $(call ex_objs,$(EXAMPLE_DIR)/shared/cli_demo_setup.c)
 TELNET_OBJS     := $(call ex_objs,$(addprefix $(EXAMPLE_DIR)/win_linux/telnet/,cli_server_telnet.c cli_transport_telnet.c)) $(DEMO_OBJ)
@@ -437,6 +448,17 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 
 -include $(LIB_OBJS:.o=.d) $(LIB_SHARED_OBJS:.o=.d) $(EX_OBJS:.o=.d)
 
+# Link-mode marker (see LINK_STAMP)
+$(LINK_STAMP):
+	@$(call mkdir_p,$(@D))
+ifeq ($(CMD_SHELL),1)
+	@if exist "$(subst /,\,$(LINK_STAMP_OTHER))" del /q "$(subst /,\,$(LINK_STAMP_OTHER))"
+	@type nul > "$(subst /,\,$@)"
+else
+	@rm -f $(LINK_STAMP_OTHER)
+	@: > $@
+endif
+
 # ---------------------------------------------------------------------------
 #  Example: Telnet server  (host)
 # ---------------------------------------------------------------------------
@@ -444,7 +466,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 ifeq ($(BUILD_EXAMPLE_TELNET),1)
 cli_server_telnet telnet: $(TELNET_BIN)
 
-$(TELNET_BIN): $(TELNET_OBJS) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
+$(TELNET_BIN): $(TELNET_OBJS) $(LIB_OUT) $(LIB_RUNTIME) $(LINK_STAMP) | $(BIN_DIR)
 	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(TELNET_OBJS) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_telnet.map -o $@
 else
 cli_server_telnet telnet:
@@ -459,7 +481,7 @@ endif
 ifeq ($(BUILD_EXAMPLE_TCP),1)
 cli_server_tcp tcp: $(TCP_BIN)
 
-$(TCP_BIN): $(TCP_OBJS) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
+$(TCP_BIN): $(TCP_OBJS) $(LIB_OUT) $(LIB_RUNTIME) $(LINK_STAMP) | $(BIN_DIR)
 	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(TCP_OBJS) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_tcp.map -o $@
 else
 cli_server_tcp tcp:
@@ -474,7 +496,7 @@ endif
 ifeq ($(BUILD_EXAMPLE_SERIAL),1)
 cli_server_serial uart: $(SERIAL_BIN)
 
-$(SERIAL_BIN): $(SERIAL_OBJS) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
+$(SERIAL_BIN): $(SERIAL_OBJS) $(LIB_OUT) $(LIB_RUNTIME) $(LINK_STAMP) | $(BIN_DIR)
 	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(SERIAL_OBJS) $(LIB_LINK) $(PLAT_LIBS) $(MAP_FLAG)$(BUILD_DIR)/cli_server_serial.map -o $@
 else
 cli_server_serial uart:
@@ -495,7 +517,7 @@ else
 PIPE_THREAD_LIBS := -lpthread
 endif
 
-$(PIPE_BIN): $(PIPE_OBJS) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
+$(PIPE_BIN): $(PIPE_OBJS) $(LIB_OUT) $(LIB_RUNTIME) $(LINK_STAMP) | $(BIN_DIR)
 	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(PIPE_OBJS) $(LIB_LINK) $(PLAT_LIBS) $(PIPE_THREAD_LIBS) \
 	    $(MAP_FLAG)$(BUILD_DIR)/cli_server_pipe.map -o $@
 else
@@ -512,7 +534,7 @@ ifneq ($(PLATFORM),windows)
 .PHONY: cli_server_unix_socket unix-socket
 cli_server_unix_socket unix-socket: $(UNIX_SOCK_BIN)
 
-$(UNIX_SOCK_BIN): $(UNIX_SOCK_OBJS) $(LIB_OUT) $(LIB_RUNTIME) | $(BIN_DIR)
+$(UNIX_SOCK_BIN): $(UNIX_SOCK_OBJS) $(LIB_OUT) $(LIB_RUNTIME) $(LINK_STAMP) | $(BIN_DIR)
 	$(CC) $(EXAMPLE_CFLAGS) $(LDFLAGS) $(UNIX_SOCK_OBJS) $(LIB_LINK) $(PLAT_LIBS) -lpthread \
 	    $(MAP_FLAG)$(BUILD_DIR)/cli_server_unix_socket.map -o $@
 else
@@ -532,7 +554,7 @@ endif
 #  Embedded cross-compile target  →  build/gcc/embedded-baremetal/libs/libopenlibcli.a
 #
 #  Usage:
-#    make embedded-baremetal                   # uses default CC=arm-none-eabi-gcc
+#    make CC=arm-none-eabi-gcc embedded-baremetal   # CC: the cross-compiler (there is no default)
 #    make CC=riscv32-unknown-elf-gcc embedded-baremetal
 #    make CFLAGS="-mcpu=cortex-m0 -mthumb -Os -Icli" embedded-baremetal
 # ---------------------------------------------------------------------------
@@ -755,7 +777,7 @@ help:
 	@$(call say,)
 	@$(call say,Examples:)
 	@$(call say,  make)
-	@$(call say,  make BUILD_EXAMPLE_PIPE=0)
+	@$(call say,  make BUILD_EXAMPLE_PIPE=1   pipe example only: setting any BUILD_EXAMPLE_* turns the others off)
 	@$(call say,  make run-telnet PORT=9999)
 	@$(call say,  make CC=clang)
 	@$(call say,  make asan)

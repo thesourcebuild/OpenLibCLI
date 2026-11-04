@@ -2429,6 +2429,207 @@ static void test_duplicate_of_submenu_rejected(void) {
 }
 #endif
 
+/* Round 9 regressions ------------------------------------------------------------------*/
+
+#if CLI_ENABLE_TIME_SOURCE
+static uint32_t s_now2; /* a second clock */
+
+static uint32_t t_now2(void *ctx) {
+  (void)ctx;
+  return s_now2;
+}
+#endif
+
+#if CLI_ENABLE_PERIODIC_CALLBACK
+static int s_periodic_calls;
+
+static int8_t periodic_count_cb(cli_struct_t *cli) {
+  (void)cli;
+  s_periodic_calls++;
+  return CLI_OK;
+}
+
+static void test_time_source_change_keeps_periodic(void) {
+  TEST_START("time_source_change_keeps_periodic");
+  session_new();
+  cli_set_periodic_cb(&s_cli, periodic_count_cb);
+  cli_set_periodic_interval(&s_cli, 60U);
+  session_start();
+  s_periodic_calls = 0;
+
+  s_now += 10U; /* 10 s of the 60 s period have passed */
+  (void)run();
+  s_now2 = 5U;
+  cli_set_time_source(&s_cli, t_now2, NULL);
+  (void)run();
+  ASSERT_EQ(s_periodic_calls, 0); /* the new clock's reading is not "time passed" */
+  s_now2 += 49U;
+  (void)run();
+  ASSERT_EQ(s_periodic_calls, 0);
+  s_now2 += 1U; /* 60 s in all */
+  (void)run();
+  ASSERT_EQ(s_periodic_calls, 1);
+  TEST_END();
+}
+#endif
+
+#if CLI_ENABLE_AUTH && CLI_ENABLE_TIME_SOURCE
+static void test_time_source_change_keeps_lockout(void) {
+  TEST_START("time_source_change_keeps_lockout");
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_auth_failure_mode(&s_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
+  cli_set_auth_lockout_duration(&s_cli, 300U);
+  session_start();
+
+  type("x\rx\rx\rx\rx\rx\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  s_now += 10U;
+  s_now2 = 5U;
+  cli_set_time_source(&s_cli, t_now2, NULL);
+  (void)run();
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  s_now2 += 289U; /* 299 s in all */
+  (void)run();
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  s_now2 += 1U;
+  (void)run();
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  TEST_END();
+}
+#endif
+
+#if CLI_ENABLE_ALIASES
+static void test_duplicate_sees_all_children(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("duplicate_sees_all_children");
+  session_new();
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "show2", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, h, "running", cmd_name, CLI_PRIV_PRIVILEGED, CLI_MODE_ANY, "");
+  ASSERT_EQ(cli_add_command_duplicate(&s_cli, h, "display"), CLI_CMD_INVALID);
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "iface", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, h, "mtu", cmd_name, CLI_PRIV_USER, CLI_MODE_CONFIG, "");
+  ASSERT_EQ(cli_add_command_duplicate(&s_cli, h, "intf"), CLI_CMD_INVALID);
+  TEST_END();
+}
+#endif
+
+static void test_error_after_callback_output(void) {
+  TEST_START("error_after_callback_output");
+  session_new();
+  session_start();
+
+  /* Default transport: a partial line, then the error on a line of its own. */
+  (void)cli_print(&s_cli, "temp=42");
+  ASSERT_EQ(cli_error(&s_cli, "abc"), 7); /* "% abc\r\n" */
+  ASSERT_OUT("temp=42\r\n% abc\r\n");
+#if CLI_ENABLE_PRINT_TRANSPORT_CB
+  s_lines[0] = '\0';
+  cli_set_print_transport_cb(&s_cli, t_line);
+  (void)cli_print(&s_cli, "temp=");
+  (void)cli_print(&s_cli, "42");
+  (void)cli_error(&s_cli, "sensor fault");
+  ASSERT_STR_EQ(s_lines, "<temp=42><% sensor fault>");
+#endif
+  TEST_END();
+}
+
+#if CLI_ENABLE_IDLE_TIMEOUT
+static void test_idle_reset_message_placement(void) {
+  TEST_START("idle_reset_message_placement");
+  session_new();
+  cli_set_idle_timeout(&s_cli, 5U);
+  cli_set_idle_timeout_mode(&s_cli, CLI_IDLE_TIMEOUT_POLICY_RESET_SESSION);
+  session_start();
+
+  type("ab");
+  out_clear();
+  s_now += 5U;
+  (void)run();
+  ASSERT_OUT("\r\n% Idle timeout. Session restarted.\r\nrtr> ");
+  ASSERT_NOT_OUT("\r\n\r\n");
+  TEST_END();
+}
+#endif
+
+#if CLI_ENABLE_TAB_COMPLETION
+static void test_tab_inside_word_completes_word(void) {
+  TEST_START("tab_inside_word_completes_word");
+  session_new();
+  session_start();
+
+  type("ech");
+  type("\x1b[D\x1b[D"); /* cursor between "e" and "ch" */
+  type("\t");
+  ASSERT_STR_EQ(s_cli.input, "echo ");
+  ASSERT_EQ(s_cli.cursor, 5);
+
+  type("\x15"); /* Ctrl-U: empty line */
+  type("show vers extra");
+  type("\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D"); /* inside "vers" */
+  type("\t");
+  ASSERT_STR_EQ(s_cli.input, "show version  extra");
+  TEST_END();
+}
+#endif
+
+#if CLI_ENABLE_PIPE_FILTER
+static void test_help_after_pipe(void) {
+  TEST_START("help_after_pipe");
+  session_new();
+  session_start();
+
+  type("show | ?"); /* 'show' has subcommands: the filter part is described */
+  ASSERT_NOT_OUT("Unknown command");
+  ASSERT_OUT("  grep ");
+  ASSERT_OUT("  include ");
+  ASSERT_OUT("  count ");
+  type("\x15");
+  out_clear();
+  type("echo x | ex?");
+  ASSERT_OUT("  exclude ");
+  ASSERT_NOT_OUT("  grep ");
+  type("\x15");
+  out_clear();
+  type("echo x | inc ?");
+  ASSERT_OUT("  <pattern> ");
+  type("\x15");
+  out_clear();
+  type("echo x | count ?");
+  ASSERT_OUT("  <cr>");
+  type("\x15");
+  out_clear();
+  type("echo x | foo ?");
+  ASSERT_OUT("% Invalid filter");
+  TEST_END();
+}
+#endif
+
+#if CLI_ENABLE_PIPE_FILTER && CLI_ENABLE_TAB_COMPLETION
+static void test_tab_after_pipe(void) {
+  TEST_START("tab_after_pipe");
+  session_new();
+  session_start();
+
+  type("echo x | inc\t");
+  ASSERT_STR_EQ(s_cli.input, "echo x | include ");
+  type("\x15");
+  type("echo x | CO\t");
+  ASSERT_STR_EQ(s_cli.input, "echo x | count ");
+  type("\x15");
+  out_clear();
+  type("echo x |\t"); /* every keyword is listed */
+  ASSERT_OUT("  begin ");
+  ASSERT_OUT("  exclude ");
+  type("\x15");
+  type("echo x | include fo\t"); /* the pattern is free text: nothing is completed */
+  ASSERT_STR_EQ(s_cli.input, "echo x | include fo");
+  TEST_END();
+}
+#endif
+
 static void test_null_safety(void) {
   TEST_START("null_safety");
   session_new();
@@ -2604,6 +2805,28 @@ int main(void) {
   RUN_SUITE(test_print_contracts);
 #if CLI_ENABLE_ALIASES
   RUN_SUITE(test_duplicate_of_submenu_rejected);
+#endif
+#if CLI_ENABLE_PERIODIC_CALLBACK
+  RUN_SUITE(test_time_source_change_keeps_periodic);
+#endif
+#if CLI_ENABLE_AUTH && CLI_ENABLE_TIME_SOURCE
+  RUN_SUITE(test_time_source_change_keeps_lockout);
+#endif
+#if CLI_ENABLE_ALIASES
+  RUN_SUITE(test_duplicate_sees_all_children);
+#endif
+  RUN_SUITE(test_error_after_callback_output);
+#if CLI_ENABLE_IDLE_TIMEOUT
+  RUN_SUITE(test_idle_reset_message_placement);
+#endif
+#if CLI_ENABLE_TAB_COMPLETION
+  RUN_SUITE(test_tab_inside_word_completes_word);
+#endif
+#if CLI_ENABLE_PIPE_FILTER
+  RUN_SUITE(test_help_after_pipe);
+#endif
+#if CLI_ENABLE_PIPE_FILTER && CLI_ENABLE_TAB_COMPLETION
+  RUN_SUITE(test_tab_after_pipe);
 #endif
 
   printf("\n--- robustness ---\n");

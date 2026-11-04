@@ -831,7 +831,8 @@ struct cli_s {
   cli_filter_enum_t filter_type;          /**< Active filter type for the current command. */
   char filter_pattern[CLI_MAX_INPUT_LEN]; /**< Pattern string for grep / exclude
                                              / begin filters. */
-  cli_len_t filter_count;                 /**< Line count accumulated by the @c count filter. */
+  uint32_t filter_count;                  /**< Line count accumulated by the @c count filter
+                                             (32-bit: an int may have only 16). */
   bool filter_begin_found;                /**< True once the begin-pattern has been seen. */
 #endif                                    /* CLI_ENABLE_PIPE_FILTER */
 
@@ -1719,8 +1720,9 @@ OPENLIBCLI_API int cli_println_p(cli_struct_t *cli, const char *fmt, ...);
  * @param[in] fmt  printf-style format string.
  * @param[in] ...  Format arguments.
  *
- * @return Number of characters written to the output, or a negative value on
- *         encoding error.
+ * @return Number of characters of the error line: the message as @c vsnprintf counts it plus
+ *         the @c "% " prefix and the @c \\r\\n suffix (like @c cli_println), or a negative
+ *         value on encoding error.
  */
 OPENLIBCLI_API int cli_error_p(cli_struct_t *cli, const char *fmt, ...);
 

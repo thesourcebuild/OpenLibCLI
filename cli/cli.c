@@ -366,6 +366,9 @@ static int8_t cli_resolve_one(cli_struct_t *cli, const char *word, cli_cmd_handl
                               cli_cmd_handle_t *out);
 static bool cli_has_any_match(cli_struct_t *cli, const char *word, cli_cmd_handle_t parent);
 static bool cli_cmd_has_children(const cli_struct_t *cli, cli_cmd_handle_t parent);
+#if CLI_ENABLE_ALIASES
+static bool cli_cmd_has_registered_children(const cli_struct_t *cli, cli_cmd_handle_t parent);
+#endif
 static cli_cmd_handle_t cli_first_word_parent(cli_struct_t *cli, const char *word);
 static int8_t cli_walk_words(cli_struct_t *cli, const char *argv[], int count,
                              cli_cmd_handle_t *parent, bool *args);
@@ -377,12 +380,14 @@ static cli_cmd_handle_t cli_menu_context_parent(const cli_struct_t *cli);
 
 #if CLI_ENABLE_TAB_COMPLETION
 static void cli_tab_complete(cli_struct_t *cli);
+static void cli_tab_complete_words(cli_struct_t *cli, char *scratch);
 static bool cli_complete_cb(cli_struct_t *cli, cli_cmd_handle_t h, const char *text, void *raw);
 #endif
 
 /* Inline '?' Help ----------------------------------------------------------------------*/
 
 static void cli_show_help(cli_struct_t *cli);
+static void cli_show_help_words(cli_struct_t *cli, char *scratch);
 
 /* Output Filter (Pipe Processing) ------------------------------------------------------*/
 
@@ -392,6 +397,13 @@ static bool cli_filter_line(cli_struct_t *cli, const char *line);
 static void cli_filter_flush(cli_struct_t *cli);
 static char *cli_find_pipe(char *line);
 static int8_t cli_parse_filter(cli_struct_t *cli, char *line);
+static cli_filter_enum_t cli_filter_lookup(const char *kw, bool *ambiguous);
+static bool cli_filter_split(char *tail, char **kw, char **pattern);
+static void cli_filter_help_line(cli_struct_t *cli, const char *name, cli_filter_enum_t type);
+static void cli_filter_show_help(cli_struct_t *cli, char *tail);
+#if CLI_ENABLE_TAB_COMPLETION
+static void cli_filter_tab_complete(cli_struct_t *cli, char *tail);
+#endif
 #endif
 
 /* Command Execution --------------------------------------------------------------------*/
@@ -1353,6 +1365,24 @@ OPENLIBCLI_API int8_t cli_set_mode_name(cli_struct_t *cli, cli_mode_t mode, cons
 OPENLIBCLI_API void cli_set_time_source(cli_struct_t *cli, cli_time_fn fn, void *ctx) {
 #if CLI_ENABLE_TIME_SOURCE
   if (cli != NULL) {
+#if CLI_ENABLE_PERIODIC_CALLBACK || CLI_ENABLE_AUTH
+    /* Timestamps taken from the old clock mean nothing on the new one. A running period
+     * (periodic interval, login lockout) keeps the time it has already run and continues
+     * from now on the new clock; without an old clock it starts now. */
+    bool had_clock = (cli->time_source != NULL);
+    uint32_t old_now = had_clock ? cli->time_source(cli->time_source_ctx) : 0U;
+    uint32_t new_now = (fn != NULL) ? fn(ctx) : 0U;
+
+#if CLI_ENABLE_PERIODIC_CALLBACK
+    cli->last_periodic_ts = had_clock ? new_now - (old_now - cli->last_periodic_ts) : new_now;
+#endif
+#if CLI_ENABLE_AUTH
+    if (cli->auth_state == CLI_AUTH_LOCKOUT) {
+      cli->auth_lockout_started_ts =
+          had_clock ? new_now - (old_now - cli->auth_lockout_started_ts) : new_now;
+    }
+#endif
+#endif
     cli->time_source = fn;
     cli->time_source_ctx = ctx;
     cli_idle_period_restart(cli);
@@ -1482,6 +1512,7 @@ OPENLIBCLI_API int8_t cli_check_idle_timeout(cli_struct_t *cli) {
       uint32_t elapsed = (now - cli->last_action_ts);
       if (elapsed >= cli->idle_timeout) {
         rc = cli_handle_idle_timeout(cli);
+        cli_flush(cli); /* also when called from the main loop, outside an engine tick */
       }
     }
   }
@@ -1594,7 +1625,7 @@ OPENLIBCLI_API cli_cmd_handle_t cli_add_command_duplicate(cli_struct_t *cli,
   /* Sub-commands are not shared: a duplicate of a submenu would be reachable without them
    * (an inline alias, cli_cmd_add_alias(), keeps them). */
   if (cli_handle_valid(cli, original) && alias_name != NULL &&
-      !cli_cmd_has_children(cli, original)) {
+      !cli_cmd_has_registered_children(cli, original)) {
     const cli_cmd_struct_t *orig = &cli->cmd_pool[original];
     /* The new name comes from the caller (program memory on AVR); the copied help text
      * already lives in the original node, i.e. in RAM. */
@@ -2111,19 +2142,18 @@ OPENLIBCLI_API int cli_error_p(cli_struct_t *cli, const char *fmt, ...) {
     //-V::2604
     (void)va_end(ap);
 
+    /* As for cli_println(): the line as vsnprintf counts it, with its "% " prefix and \r\n. */
+    rc = (n < 0) ? n : (n + 4);
     if (n < 0) {
       /* Encoding error: buf contents are unspecified, emit nothing. */
-      rc = n;
     } else if (cli->print_cb != NULL) {
       cli->print_cb(cli, msg, CLI_PRINT_KIND_ERROR); /* the kind tells it is an error */
-      rc = (int)strlen(msg);
     } else {
       /* Errors bypass filters and always appear — after any output already produced, so a
-       * buffered partial line is delivered first. */
+       * buffered partial line (of a command, or of a callback outside any) is delivered
+       * first. */
       bool in_command = (cli->exec_depth > 0U);
-      if (in_command) {
-        cli_output_end_line(cli);
-      }
+      cli_output_end_line(cli);
 #if CLI_ENABLE_PRINT_TRANSPORT_CB
       if (cli->print_transport_cb != NULL) {
         cli->print_transport_cb(cli, buf);
@@ -2137,7 +2167,6 @@ OPENLIBCLI_API int cli_error_p(cli_struct_t *cli, const char *fmt, ...) {
         cli_write_str(cli, buf);
         CLI_WSTR(cli, CLI_CRLF);
       }
-      rc = (int)strlen(msg);
     }
   }
 
@@ -2606,10 +2635,12 @@ static int8_t cli_handle_idle_timeout(cli_struct_t *cli) {
     }
   } else {
     if (cli->idle_timeout_policy == CLI_IDLE_TIMEOUT_POLICY_RESET_SESSION) {
-      CLI_WSTR(cli, "\r\n% Idle timeout. Session restarted.\r\n");
-      /* The restarted session is disarmed until the user types again, so an unattended
-       * session is reset once instead of every timeout period. */
+      /* The restart moves below the prompt line (delivering what was printed so far); the
+       * message follows there, before the new session's banner and prompt. The restarted
+       * session is disarmed until the user types again, so an unattended session is reset
+       * once instead of every timeout period. */
       cli_restart_session(cli);
+      CLI_WSTR(cli, "% Idle timeout. Session restarted.\r\n");
     } else if (cli->idle_timeout_policy == CLI_IDLE_TIMEOUT_POLICY_CLOSE) {
       CLI_WSTR(cli, "\r\n% Idle timeout.\r\n");
       cli->session_state = CLI_SESSION_STOP;
@@ -3734,6 +3765,26 @@ static bool cli_cmd_has_children(const cli_struct_t *cli, cli_cmd_handle_t paren
   return has_children;
 }
 
+#if CLI_ENABLE_ALIASES
+/**
+ * @brief Test whether @p parent has any registered child, whatever its privilege or mode.
+ *
+ * @param[in] cli     Active CLI session.
+ * @param[in] parent  Parent command handle.
+ *
+ * @return @c true when a child exists, otherwise @c false.
+ */
+static bool cli_cmd_has_registered_children(const cli_struct_t *cli, cli_cmd_handle_t parent) {
+  bool found = False;
+
+  for (cli_poolsize_t i = 0; i < cli->cmd_pool_size && !found; i++) {
+    found = CLI_CMD_IS_IN_USE(&cli->cmd_pool[i]) && cli->cmd_pool[i].parent == parent;
+  }
+
+  return found;
+}
+#endif
+
 /**
  * @brief Return the level at which the first word of a line is looked up.
  *
@@ -3874,11 +3925,38 @@ static cli_cmd_handle_t cli_menu_context_parent(const cli_struct_t *cli) {
  * @param[in] cli  Active CLI session.
  */
 static void cli_tab_complete(cli_struct_t *cli) {
+  /* With the cursor inside a word, that whole word is completed: the cursor moves to the
+   * word's end first (as zsh does), so a completion never splits a word. */
+  cli_len_t end = cli->cursor;
+  while (end < cli->input_len && cli->input[end] != ' ' && cli->input[end] != '\t') {
+    end++;
+  }
+  cli_move_cursor(cli, end);
+
   /* Complete the word that ends at the cursor: only the text before it counts. */
   char scratch[CLI_MAX_INPUT_LEN];
   (void)cli_strlcpy(scratch, cli->input, CLI_MAX_INPUT_LEN);
   scratch[cli->cursor] = '\0';
 
+#if CLI_ENABLE_PIPE_FILTER
+  char *pipe = cli_find_pipe(scratch);
+  if (pipe != NULL) {
+    /* After '|': a filter keyword, then its pattern. */
+    cli_filter_tab_complete(cli, pipe + 1);
+  } else
+#endif
+  {
+    cli_tab_complete_words(cli, scratch);
+  }
+}
+
+/**
+ * @brief Tab completion of command words (no pipe filter before the cursor).
+ *
+ * @param[in]     cli      Active CLI session.
+ * @param[in,out] scratch  The line up to the cursor (tokenized in place).
+ */
+static void cli_tab_complete_words(cli_struct_t *cli, char *scratch) {
   const char *argv[CLI_MAX_ARGS];
   cli_argc_t argc = 0;
   cli_tokenize_status_enum_t tok = cli_tokenize(scratch, argv, CLI_MAX_ARGS, &argc);
@@ -4001,6 +4079,30 @@ static void cli_show_help(cli_struct_t *cli) {
   (void)cli_strlcpy(scratch, cli->input, CLI_MAX_INPUT_LEN);
   scratch[cli->cursor] = '\0';
 
+  /* Echo the '?' so the help request is visible on the edited line. */
+  cli_write_char(cli, '?');
+
+#if CLI_ENABLE_PIPE_FILTER
+  char *pipe = cli_find_pipe(scratch);
+  if (pipe != NULL) {
+    /* After '|': the filter keywords, or what the chosen filter takes. */
+    CLI_WSTR(cli, CLI_CRLF);
+    cli_filter_show_help(cli, pipe + 1);
+    cli_redraw_line(cli);
+  } else
+#endif
+  {
+    cli_show_help_words(cli, scratch);
+  }
+}
+
+/**
+ * @brief Inline @c ? help for command words (no pipe filter before the cursor).
+ *
+ * @param[in]     cli      Active CLI session.
+ * @param[in,out] scratch  The line up to the cursor (tokenized in place).
+ */
+static void cli_show_help_words(cli_struct_t *cli, char *scratch) {
   const char *argv[CLI_MAX_ARGS];
   cli_argc_t argc = 0;
   cli_tokenize_status_enum_t tok = cli_tokenize(scratch, argv, CLI_MAX_ARGS, &argc);
@@ -4010,9 +4112,6 @@ static void cli_show_help(cli_struct_t *cli) {
   const char *partial = (argc > 0 && !trailing_space) ? argv[argc - 1] : "";
   int depth = (trailing_space) ? argc : ((argc > 0) ? argc - 1 : 0);
   bool show = True;
-
-  /* Echo the '?' so the help request is visible on the edited line. */
-  cli_write_char(cli, '?');
 
   if (tok == CLI_TOKENIZE_TOO_MANY) {
     CLI_WSTR(cli, "\r\n% Too many arguments.\r\n");
@@ -4065,7 +4164,7 @@ static void cli_show_help(cli_struct_t *cli) {
 static void cli_filter_reset(cli_struct_t *cli) {
   cli->filter_type = CLI_FILTER_NONE;
   cli->filter_pattern[0] = '\0';
-  cli->filter_count = 0;
+  cli->filter_count = 0U;
   cli->filter_begin_found = False;
 }
 
@@ -4103,7 +4202,9 @@ static bool cli_filter_line(cli_struct_t *cli, const char *line) {
     break;
 
   case CLI_FILTER_COUNT:
-    cli->filter_count++;
+    if (cli->filter_count < UINT32_MAX) {
+      cli->filter_count++; /* saturates rather than wrapping to a small count */
+    }
     result = False; /* accumulate, print in flush */
     break;
 
@@ -4124,9 +4225,9 @@ static void cli_filter_flush(cli_struct_t *cli) {
   if (cli->filter_type == CLI_FILTER_COUNT) {
     char buf[32];
 #if defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
-    snprintf_P(buf, sizeof(buf), PSTR("Count: %d"), cli->filter_count);
+    snprintf_P(buf, sizeof(buf), PSTR("Count: %lu"), (unsigned long)cli->filter_count);
 #else
-    (void)cli_snprintf(buf, sizeof(buf), "Count: %d", cli->filter_count);
+    (void)cli_snprintf(buf, sizeof(buf), "Count: %lu", (unsigned long)cli->filter_count);
 #endif
     /* The total itself must not pass through the count filter. */
 #if CLI_ENABLE_PRINT_TRANSPORT_CB
@@ -4180,6 +4281,209 @@ static const struct {
     {"begin", CLI_FILTER_BEGIN},   {"count", CLI_FILTER_COUNT},
 };
 
+/** @brief Number of entries in @c s_filter_keywords. */
+#define CLI_FILTER_KEYWORD_COUNT (sizeof(s_filter_keywords) / sizeof(s_filter_keywords[0]))
+
+/**
+ * @brief Look up a pipe filter keyword, which may be abbreviated.
+ *
+ * @param[in]  kw         Keyword as typed.
+ * @param[out] ambiguous  Set when @p kw abbreviates keywords of different filters.
+ *
+ * @return The filter, or @c CLI_FILTER_NONE when no keyword starts with @p kw.
+ */
+static cli_filter_enum_t cli_filter_lookup(const char *kw, bool *ambiguous) {
+  cli_filter_enum_t type = CLI_FILTER_NONE;
+
+  *ambiguous = False;
+  for (size_t i = 0; i < CLI_FILTER_KEYWORD_COUNT; i++) {
+    if (kw[0] != '\0' && cli_case_prefix_match(s_filter_keywords[i].keyword, kw)) {
+      if (type != CLI_FILTER_NONE && type != s_filter_keywords[i].type) {
+        *ambiguous = True;
+      }
+      type = s_filter_keywords[i].type;
+    }
+  }
+
+  return type;
+}
+
+/**
+ * @brief Split the filter part of a line being edited (the text after '|' up to the
+ *        cursor) for @c ? and Tab.
+ *
+ * @param[in,out] tail     Text after the '|'; the keyword is terminated in place.
+ * @param[out]    kw       Keyword typed so far (may be empty).
+ * @param[out]    pattern  Pattern typed so far (empty while the keyword is being typed).
+ *
+ * @return @c true while the cursor is still on the keyword.
+ */
+static bool cli_filter_split(char *tail, char **kw, char **pattern) {
+  char *kw_end;
+  bool at_keyword;
+
+  *kw = cli_skip_spaces(tail);
+  kw_end = cli_skip_non_spaces(*kw);
+  at_keyword = (*kw_end == '\0');
+  *pattern = kw_end;
+  if (!at_keyword) {
+    *kw_end = '\0';
+    *pattern = cli_skip_spaces(kw_end + 1);
+  }
+
+  return at_keyword;
+}
+
+/**
+ * @brief Print one line of filter help: @p name, then the description of @p type in the
+ *        help column (@c CLI_FILTER_NONE describes the pattern).
+ *
+ * @param[in] cli   Active CLI session.
+ * @param[in] name  Keyword or placeholder shown.
+ * @param[in] type  Filter described.
+ */
+static void cli_filter_help_line(cli_struct_t *cli, const char *name, cli_filter_enum_t type) {
+  size_t col = 2U + strlen(name);
+
+  CLI_WSTR(cli, "  ");
+  cli_write_str(cli, name);
+  do {
+    cli_write_char(cli, ' ');
+    col++;
+  } while (col < CLI_HELP_NAME_COL);
+
+  switch (type) {
+  case CLI_FILTER_GREP:
+    CLI_WSTR(cli, "Show the lines that contain the pattern");
+    break;
+  case CLI_FILTER_EXCLUDE:
+    CLI_WSTR(cli, "Hide the lines that contain the pattern");
+    break;
+  case CLI_FILTER_BEGIN:
+    CLI_WSTR(cli, "Show the output from the first line with the pattern");
+    break;
+  case CLI_FILTER_COUNT:
+    CLI_WSTR(cli, "Count the output lines");
+    break;
+  default:
+    CLI_WSTR(cli, "Text to look for (in double quotes to keep spaces)");
+    break;
+  }
+  CLI_WSTR(cli, CLI_CRLF);
+}
+
+/**
+ * @brief Inline @c ? help after a '|': the filter keywords that match what is typed, or
+ *        what the chosen filter takes.
+ *
+ * @param[in]     cli   Active CLI session.
+ * @param[in,out] tail  Text after the '|' up to the cursor.
+ */
+static void cli_filter_show_help(cli_struct_t *cli, char *tail) {
+  char *kw;
+  char *pattern;
+
+  if (cli_filter_split(tail, &kw, &pattern)) {
+    bool any = False;
+    for (size_t i = 0; i < CLI_FILTER_KEYWORD_COUNT; i++) {
+      if (cli_case_prefix_match(s_filter_keywords[i].keyword, kw)) {
+        cli_filter_help_line(cli, s_filter_keywords[i].keyword, s_filter_keywords[i].type);
+        any = True;
+      }
+    }
+    if (!any) {
+      CLI_WSTR(cli, "% Invalid filter (use grep, include, exclude, begin or count).\r\n");
+    }
+  } else {
+    bool ambiguous;
+    cli_filter_enum_t type = cli_filter_lookup(kw, &ambiguous);
+
+    if (type == CLI_FILTER_NONE || ambiguous) {
+      CLI_WSTR(cli, "% Invalid filter (use grep, include, exclude, begin or count).\r\n");
+    } else if (type == CLI_FILTER_COUNT) {
+      if (pattern[0] != '\0') {
+        CLI_WSTR(cli, "% The count filter takes no pattern.\r\n");
+      } else {
+        CLI_WSTR(cli, "  <cr>\r\n");
+      }
+    } else if (pattern[0] == '\0') {
+      cli_filter_help_line(cli, "<pattern>", CLI_FILTER_NONE);
+    } else {
+      CLI_WSTR(cli, "  <cr>\r\n");
+    }
+  }
+}
+
+#if CLI_ENABLE_TAB_COMPLETION
+/**
+ * @brief Tab completion after a '|': completes the filter keyword. The pattern is free
+ *        text and is never completed.
+ *
+ * @param[in]     cli   Active CLI session.
+ * @param[in,out] tail  Text after the '|' up to the cursor.
+ */
+static void cli_filter_tab_complete(cli_struct_t *cli, char *tail) {
+  char *kw;
+  char *pattern;
+
+  if (!cli_filter_split(tail, &kw, &pattern)) {
+    cli_write_char(cli, '\a');
+  } else {
+    size_t kw_len = strlen(kw);
+    size_t count = 0U;
+    size_t first = 0U;
+    size_t common = 0U;
+
+    for (size_t i = 0; i < CLI_FILTER_KEYWORD_COUNT; i++) {
+      const char *name = s_filter_keywords[i].keyword;
+      if (cli_case_prefix_match(name, kw)) {
+        if (count == 0U) {
+          first = i;
+          common = strlen(name);
+        } else {
+          size_t j = 0U;
+          while (j < common && name[j] == s_filter_keywords[first].keyword[j]) {
+            j++;
+          }
+          common = j;
+        }
+        count++;
+      }
+    }
+
+    if (count == 0U) {
+      cli_write_char(cli, '\a');
+    } else if (count == 1U || common > kw_len) {
+      const char *name = s_filter_keywords[first].keyword;
+      size_t keep = kw_len;
+      size_t stop = (count == 1U) ? strlen(name) : common;
+
+      /* Typed in another case ("INC"): rewritten in the keyword's case, as commands are. */
+      if (strncmp(name, kw, kw_len) != 0) {
+        for (size_t i = 0; i < kw_len; i++) {
+          cli_backspace(cli);
+        }
+        keep = 0U;
+      }
+      for (size_t i = keep; i < stop; i++) {
+        cli_insert_char(cli, name[i]);
+      }
+      if (count == 1U) {
+        cli_insert_char(cli, ' ');
+      }
+    } else {
+      CLI_WSTR(cli, CLI_CRLF);
+      for (size_t i = 0; i < CLI_FILTER_KEYWORD_COUNT; i++) {
+        if (cli_case_prefix_match(s_filter_keywords[i].keyword, kw)) {
+          cli_filter_help_line(cli, s_filter_keywords[i].keyword, s_filter_keywords[i].type);
+        }
+      }
+      cli_redraw_line(cli);
+    }
+  }
+}
+#endif /* CLI_ENABLE_TAB_COMPLETION */
+
 /**
  * @brief Parse and activate a pipe filter from the input line.
  *
@@ -4202,8 +4506,7 @@ static int8_t cli_parse_filter(cli_struct_t *cli, char *line) {
   char *pipe = cli_find_pipe(line);
 
   if (pipe != NULL) {
-    cli_filter_enum_t type = CLI_FILTER_NONE;
-    bool ambiguous = False;
+    bool ambiguous;
 
     *pipe = '\0'; /* truncate the command at '|' */
 
@@ -4212,14 +4515,7 @@ static int8_t cli_parse_filter(cli_struct_t *cli, char *line) {
     char *pattern = cli_skip_spaces(kw_end);
     *kw_end = '\0';
 
-    for (size_t i = 0; i < sizeof(s_filter_keywords) / sizeof(s_filter_keywords[0]); i++) {
-      if (kw[0] != '\0' && cli_case_prefix_match(s_filter_keywords[i].keyword, kw)) {
-        if (type != CLI_FILTER_NONE && type != s_filter_keywords[i].type) {
-          ambiguous = True;
-        }
-        type = s_filter_keywords[i].type;
-      }
-    }
+    cli_filter_enum_t type = cli_filter_lookup(kw, &ambiguous);
 
     /* Trim trailing spaces of the pattern. */
     cli_len_t plen = (cli_len_t)strlen(pattern);

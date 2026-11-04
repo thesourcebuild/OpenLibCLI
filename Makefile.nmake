@@ -15,7 +15,8 @@
 #    nmake /f Makefile.nmake telnet       telnet server example
 #    nmake /f Makefile.nmake uart         serial server example
 #    nmake /f Makefile.nmake tcp          TCP server example
-#    nmake /f Makefile.nmake BUILD_EXAMPLE_PIPE=0
+#    nmake /f Makefile.nmake BUILD_EXAMPLE_PIPE=1   pipe example only (setting any
+#                                                   BUILD_EXAMPLE_* turns the others off)
 #
 #  Prerequisites
 #    Run from a Visual Studio "x64 Native Tools Command Prompt", or let
@@ -115,14 +116,32 @@ PIPE_BIN     = $(BIN_DIR)\cli_server_pipe.exe
 LIB_DEP        = $(SHARED_DLL)
 LIB_LINK       = $(SHARED_IMPLIB)
 EXAMPLE_CFLAGS = $(CFLAGS) /DCLI_SHARED
-EX_OBJ_DIR     = $(OBJ_DIR)\examples-shared
+LINK_MODE      = shared
+LINK_MODE_OTHER = static
 !ELSE
 LIB_DEP        = $(STATIC_LIB)
 LIB_LINK       = $(STATIC_LIB)
 EXAMPLE_CFLAGS = $(CFLAGS)
-EX_OBJ_DIR     = $(OBJ_DIR)\examples-static
+LINK_MODE      = static
+LINK_MODE_OTHER = shared
 !ENDIF
+EX_OBJ_DIR   = $(OBJ_DIR)\examples-$(LINK_MODE)
 DEMO_OBJ     = $(EX_OBJ_DIR)\demo_config.obj
+
+# The executables keep their names in both modes, so the mode they were last linked in is
+# recorded by a marker file: when the other mode's marker exists, the marker of this mode
+# is made again (always out of date), which relinks the examples.
+LINK_STAMP = $(OBJ_DIR)\linked-$(LINK_MODE)
+LINK_STAMP_OTHER = $(OBJ_DIR)\linked-$(LINK_MODE_OTHER)
+LINK_STAMP_FORCE =
+!IF EXIST($(LINK_STAMP_OTHER))
+LINK_STAMP_FORCE = _link_mode_changed
+!ENDIF
+
+# Headers each object includes (directly or through another header)
+CLI_HDRS  = $(INC_DIR)\cli.h $(INC_DIR)\cli_env_detect.h $(INC_DIR)\config\cli_config.h
+DEMO_HDRS = $(EXAMPLE_DIR)\shared\cli_demo_setup.h $(CLI_HDRS) $(INC_DIR)\cli_version.h \
+            $(INC_DIR)\utils\cli_args_parse.h
 
 # ---------------------------------------------------------------------------
 #  Library object files
@@ -254,8 +273,7 @@ shared: _dirs $(SHARED_DLL)
 # The import library $(SHARED_IMPLIB) is written by this link step and has no rule of its
 # own, so targets that link it must depend on $(SHARED_DLL): otherwise NMake treats the
 # existing .lib as an up-to-date source and keeps linking a stale library.
-$(SHARED_DLL): $(SHARED_SRCS) $(INC_DIR)\cli.h $(INC_DIR)\cli_env_detect.h \
-               $(INC_DIR)\utils\cli_args_parse.h $(INC_DIR)\config\cli_config.h
+$(SHARED_DLL): $(SHARED_SRCS) $(CLI_HDRS) $(INC_DIR)\utils\cli_args_parse.h
     $(CC) $(SHARED_CFLAGS) /LD /Fo$(OBJ_SHARED_DIR)\ \
         $(SHARED_SRCS) \
         /link $(LDFLAGS) /OUT:$@ /IMPLIB:$(SHARED_IMPLIB) $(PLAT_LIBS)
@@ -263,25 +281,28 @@ $(SHARED_DLL): $(SHARED_SRCS) $(INC_DIR)\cli.h $(INC_DIR)\cli_env_detect.h \
 # ---------------------------------------------------------------------------
 #  Compile library objects  (NMake uses explicit rules, no pattern rules)
 # ---------------------------------------------------------------------------
-$(OBJ_DIR)\cli.obj: $(SRC_DIR)\cli.c \
-                             $(INC_DIR)\cli.h \
-                             $(INC_DIR)\config\cli_config.h
+$(OBJ_DIR)\cli.obj: $(SRC_DIR)\cli.c $(CLI_HDRS) $(INC_DIR)\utils\cli_args_parse.h
     $(CC) $(CFLAGS) /c $(SRC_DIR)\cli.c /Fo$@
 
 $(OBJ_DIR)\utils\cli_args_parse.obj: $(SRC_DIR)\utils\cli_args_parse.c \
-                              $(INC_DIR)\utils\cli_args_parse.h \
-                              $(INC_DIR)\config\cli_config.h
+                              $(INC_DIR)\utils\cli_args_parse.h
     $(CC) $(CFLAGS) /c $(SRC_DIR)\utils\cli_args_parse.c /Fo$@
 
 
 # ---------------------------------------------------------------------------
 #  Shared demo object  (session setup + command handlers; linked into every example)
 # ---------------------------------------------------------------------------
-$(DEMO_OBJ): $(EXAMPLE_DIR)\shared\cli_demo_setup.c \
-             $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
-             $(INC_DIR)\cli.h \
-             $(INC_DIR)\config\cli_config.h
+$(DEMO_OBJ): $(EXAMPLE_DIR)\shared\cli_demo_setup.c $(DEMO_HDRS)
     $(CC) $(EXAMPLE_CFLAGS) /c $(EXAMPLE_DIR)\shared\cli_demo_setup.c /Fo$@
+
+# ---------------------------------------------------------------------------
+#  Link-mode marker (see LINK_STAMP)
+# ---------------------------------------------------------------------------
+$(LINK_STAMP): $(LINK_STAMP_FORCE)
+    @if exist $(LINK_STAMP_OTHER) del /q $(LINK_STAMP_OTHER)
+    @type nul > $@
+
+_link_mode_changed:
 
 # ---------------------------------------------------------------------------
 #  Telnet server example
@@ -289,13 +310,9 @@ $(DEMO_OBJ): $(EXAMPLE_DIR)\shared\cli_demo_setup.c \
 !IF "$(BUILD_EXAMPLE_TELNET)" == "1"
 telnet: _dirs $(TELNET_BIN)
 
-$(TELNET_BIN): $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.c \
-               $(EXAMPLE_DIR)\win_linux\telnet\cli_transport_telnet.c \
-               $(EXAMPLE_DIR)\win_linux\telnet\cli_transport_telnet.h \
-               $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
-               $(INC_DIR)\cli.h \
-               $(INC_DIR)\config\cli_config.h \
-               $(DEMO_OBJ) $(LIB_DEP)
+$(TELNET_BIN): $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.c $(EXAMPLE_DIR)\win_linux\telnet\cli_transport_telnet.c \
+    $(EXAMPLE_DIR)\win_linux\telnet\cli_transport_telnet.h $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.h \
+    $(DEMO_HDRS) $(DEMO_OBJ) $(LIB_DEP) $(LINK_STAMP)
     $(CC) $(EXAMPLE_CFLAGS) /Fo$(EX_OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\telnet\cli_server_telnet.c \
         $(EXAMPLE_DIR)\win_linux\telnet\cli_transport_telnet.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_telnet.map \
@@ -312,14 +329,9 @@ telnet:
 !IF "$(BUILD_EXAMPLE_SERIAL)" == "1"
 uart: _dirs $(SERIAL_BIN)
 
-$(SERIAL_BIN): $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.c \
-               $(EXAMPLE_DIR)\win_linux\serial\cli_transport_serial.c \
-               $(EXAMPLE_DIR)\win_linux\serial\cli_transport_serial.h \
-               $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.h \
-               $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
-               $(INC_DIR)\cli.h \
-               $(INC_DIR)\config\cli_config.h \
-               $(DEMO_OBJ) $(LIB_DEP)
+$(SERIAL_BIN): $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.c $(EXAMPLE_DIR)\win_linux\serial\cli_transport_serial.c \
+    $(EXAMPLE_DIR)\win_linux\serial\cli_transport_serial.h $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.h \
+    $(DEMO_HDRS) $(DEMO_OBJ) $(LIB_DEP) $(LINK_STAMP)
     $(CC) $(EXAMPLE_CFLAGS) /Fo$(EX_OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\serial\cli_server_serial.c \
         $(EXAMPLE_DIR)\win_linux\serial\cli_transport_serial.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_serial.map \
@@ -336,14 +348,9 @@ uart:
 !IF "$(BUILD_EXAMPLE_TCP)" == "1"
 tcp: _dirs $(TCP_BIN)
 
-$(TCP_BIN): $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.c \
-            $(EXAMPLE_DIR)\win_linux\tcp\cli_transport_tcp.c \
-            $(EXAMPLE_DIR)\win_linux\tcp\cli_transport_tcp.h \
-            $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.h \
-            $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
-            $(INC_DIR)\cli.h \
-            $(INC_DIR)\config\cli_config.h \
-            $(DEMO_OBJ) $(LIB_DEP)
+$(TCP_BIN): $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.c $(EXAMPLE_DIR)\win_linux\tcp\cli_transport_tcp.c \
+    $(EXAMPLE_DIR)\win_linux\tcp\cli_transport_tcp.h $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.h \
+    $(DEMO_HDRS) $(DEMO_OBJ) $(LIB_DEP) $(LINK_STAMP)
     $(CC) $(EXAMPLE_CFLAGS) /Fo$(EX_OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\tcp\cli_server_tcp.c \
         $(EXAMPLE_DIR)\win_linux\tcp\cli_transport_tcp.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_tcp.map \
@@ -360,13 +367,9 @@ tcp:
 !IF "$(BUILD_EXAMPLE_PIPE)" == "1"
 pipe: _dirs $(PIPE_BIN)
 
-$(PIPE_BIN): $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
-             $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.c \
-             $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.h \
-             $(EXAMPLE_DIR)\shared\cli_demo_setup.h \
-             $(INC_DIR)\cli.h \
-             $(INC_DIR)\config\cli_config.h \
-             $(DEMO_OBJ) $(LIB_DEP)
+$(PIPE_BIN): $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.c \
+    $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.h $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.h \
+    $(DEMO_HDRS) $(DEMO_OBJ) $(LIB_DEP) $(LINK_STAMP)
     $(CC) $(EXAMPLE_CFLAGS) /Fo$(EX_OBJ_DIR)\ $(EXAMPLE_DIR)\win_linux\pipe\cli_server_pipe.c \
         $(EXAMPLE_DIR)\win_linux\pipe\cli_transport_pipe.c \
         /Fe$@ /link $(LDFLAGS) /MAP:$(BUILD_DIR)\cli_server_pipe.map \
