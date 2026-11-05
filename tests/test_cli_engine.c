@@ -752,15 +752,18 @@ static void test_quoted_arguments(void) {
   ASSERT_OUT("% Unterminated quoted string.");
   ASSERT_NOT_OUT("ARGS");
 
-  char many[256] = "echo";
-  for (int i = 0; i < CLI_MAX_ARGS + 2; i++) {
-    strcat(many, " a");
+  /* More words than CLI_MAX_ARGS: only testable when such a line fits the editor. */
+  if (4 + 2 * (CLI_MAX_ARGS + 2) < CLI_MAX_INPUT_LEN) {
+    char many[4 + 2 * (CLI_MAX_ARGS + 2) + 2] = "echo";
+    for (int i = 0; i < CLI_MAX_ARGS + 2; i++) {
+      strcat(many, " a");
+    }
+    strcat(many, "\r");
+    out_clear();
+    type(many);
+    ASSERT_OUT("% Too many arguments.");
+    ASSERT_NOT_OUT("ARGS");
   }
-  strcat(many, "\r");
-  out_clear();
-  type(many);
-  ASSERT_OUT("% Too many arguments.");
-  ASSERT_NOT_OUT("ARGS");
   TEST_END();
 }
 
@@ -880,14 +883,16 @@ static void test_history_ring_evicts_oldest(void) {
   }
   ASSERT_EQ(s_cli.history_count, CLI_MAX_HISTORY);
 
-  /* Long entries force wrap-around: the newest commands must survive intact. */
-  char long_line[400];
+  /* Long entries (as long as the editor takes, at most 302 characters) force wrap-around:
+   * the newest commands must survive intact. */
+  enum { XS = (CLI_MAX_INPUT_LEN - 3 < 300) ? CLI_MAX_INPUT_LEN - 3 : 300 };
+  char long_line[XS + 4];
   for (int i = 0; i < 20; i++) {
-    memset(long_line, 'x', 300);
-    snprintf(&long_line[300], sizeof(long_line) - 300U, "%02d\r", i);
+    memset(long_line, 'x', XS);
+    snprintf(&long_line[XS], sizeof(long_line) - (size_t)XS, "%02d\r", i);
     type(long_line);
   }
-  ASSERT_TRUE(s_cli.history_count >= CLI_HISTORY_BUF_SIZE / 304 - 1);
+  ASSERT_TRUE(s_cli.history_count >= CLI_HISTORY_BUF_SIZE / (XS + 3) - 1);
 
   out_clear();
   type("history\r");
@@ -2431,7 +2436,9 @@ static void test_duplicate_of_submenu_rejected(void) {
 
 /* Round 9 regressions ------------------------------------------------------------------*/
 
-#if CLI_ENABLE_TIME_SOURCE
+/* Used by the clock-change tests below (periodic, lockout, idle). */
+#if CLI_ENABLE_PERIODIC_CALLBACK || CLI_ENABLE_IDLE_TIMEOUT ||                                      \
+    (CLI_ENABLE_AUTH && CLI_ENABLE_TIME_SOURCE)
 static uint32_t s_now2; /* a second clock */
 
 static uint32_t t_now2(void *ctx) {

@@ -24,6 +24,13 @@ if host_machine.system() == 'linux'
 endif
 
 cc = meson.get_compiler('c')
+
+# MSVC (and clang-cl) report the standard C functions used here (sscanf, ...) as deprecated
+# in favour of their _s variants; the CMake and NMake builds turn that off the same way.
+if cc.get_argument_syntax() == 'msvc'
+  add_project_arguments('-D_CRT_SECURE_NO_WARNINGS', language : 'c')
+endif
+
 platform_deps = []
 if host_machine.system() == 'windows'
   platform_deps += cc.find_library('ws2_32')

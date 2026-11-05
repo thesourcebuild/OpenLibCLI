@@ -754,7 +754,7 @@ help:
 	@$(call say,  run-telnet     Build + run telnet server)
 	@$(call say,  run-tcp        Build + run TCP server)
 	@$(call say,  run-serial     Build + run Serial demo)
-	@$(call say,  run-pipe       Build + run pipe demo (anonymous/scripted))
+	@$(call say,  run-pipe       Build + run pipe demo (anonymous pipe: interactive))
 	@$(call say,  run-unix-socket  Build + run UNIX socket server (POSIX only))
 	@$(call say,  clean          Remove artefacts for current platform)
 	@$(call say,  clean-all      Remove entire build/ tree)

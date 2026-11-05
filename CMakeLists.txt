@@ -41,20 +41,20 @@ set(CLI_OUT_DIR "${CMAKE_BINARY_DIR}/${CLI_PLATFORM}")
 set(CLI_BIN_DIR "${CLI_OUT_DIR}/binaries")
 set(CLI_LIB_DIR "${CLI_OUT_DIR}/libs")
 
-# Runtime executables
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY         "${CLI_BIN_DIR}")
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CLI_BIN_DIR}")
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CLI_BIN_DIR}")
-
-# Static / import libraries (.a, .lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY         "${CLI_LIB_DIR}")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG   "${CLI_LIB_DIR}")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CLI_LIB_DIR}")
-
-# Shared libraries (.so, .dll, .dylib)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY         "${CLI_LIB_DIR}")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG   "${CLI_LIB_DIR}")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CLI_LIB_DIR}")
+# Runtime executables; static / import libraries (.a, .lib); shared libraries (.so, .dll,
+# .dylib). Set for every configuration: a multi-config generator (Visual Studio, Xcode,
+# Ninja Multi-Config) would otherwise add a <Config>/ subdirectory for each one not set.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CLI_BIN_DIR}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CLI_LIB_DIR}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CLI_LIB_DIR}")
+set(CLI_OUTPUT_CONFIGS Debug Release RelWithDebInfo MinSizeRel ${CMAKE_CONFIGURATION_TYPES})
+list(REMOVE_DUPLICATES CLI_OUTPUT_CONFIGS)
+foreach(cfg IN LISTS CLI_OUTPUT_CONFIGS)
+    string(TOUPPER "${cfg}" cfg)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${cfg} "${CLI_BIN_DIR}")
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${cfg} "${CLI_LIB_DIR}")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${cfg} "${CLI_LIB_DIR}")
+endforeach()
 
 # =========================================================================
 #  Generate cli/cli_version.h from version file

@@ -11,7 +11,7 @@
  * | @c cli_server_pipe                   | Named pipe server (default name)   |
  * | @c cli_server_pipe @c named @c [n]   | Named pipe server                  |
  * | @c cli_server_pipe @c client @c [n]  | Named pipe client (stdin relay)    |
- * | @c cli_server_pipe @c anon           | Anonymous pipe self-demo           |
+ * | @c cli_server_pipe @c anon           | Anonymous pipe demo (stdin relay)  |
  *
  * **Typical two-terminal workflow**
  * @code
@@ -139,6 +139,12 @@ typedef struct {
 /** @brief Per-session application data (single-session demo). */
 static demo_app_data_struct_t s_app;
 
+#if !ENV_IS_WINDOWS
+/** @brief The named-pipe server's FIFO paths ("<name>.in", "<name>.out"), removed by
+ *         @c on_stop_signal() when SIGINT / SIGTERM ends the server. */
+static char s_fifo_paths[2][512];
+#endif
+
 /*=======================================================================================
  * Private Function Prototypes
  *=======================================================================================*/
@@ -149,6 +155,10 @@ static int run_named_client(const char *name);
 static void run_anon_demo(void);
 static void print_usage(const char *prog);
 static int8_t cli_server_loop(cli_struct_t *cli);
+#if !ENV_IS_WINDOWS
+static void on_stop_signal(int sig);
+static void stop_signals_install(const char *name);
+#endif
 
 /*=======================================================================================
  * Public Functions
@@ -266,6 +276,47 @@ static int32_t cli_pipe_read(cli_pipe_ctx_struct_t *ctx, void *buf, uint32_t len
 static int32_t cli_pipe_write(cli_pipe_ctx_struct_t *ctx, const void *buf, uint32_t len) {
   return (int32_t)write(ctx->write_fd, buf, (size_t)len);
 }
+
+/**
+ * @brief SIGINT / SIGTERM handler of the named-pipe server: remove its FIFOs, then end the
+ *        process with the signal's default action.
+ *
+ * The server waits for a client in a blocking @c open() with no timeout, so a stop flag
+ * could be missed; the handler does the cleanup itself instead. @c unlink(), @c signal()
+ * and @c raise() are async-signal-safe. Once a client is connected the FIFOs are already
+ * gone (the transport unlinks them), and removing them again does nothing.
+ *
+ * @param[in] sig  Signal received.
+ */
+static void on_stop_signal(int sig) {
+  (void)unlink(s_fifo_paths[0]);
+  (void)unlink(s_fifo_paths[1]);
+  (void)signal(sig, SIG_DFL);
+  (void)raise(sig); /* delivered when the handler returns: the default action ends us */
+}
+
+/**
+ * @brief Record the FIFO paths of @p name and install @c on_stop_signal() for SIGINT and
+ *        SIGTERM.
+ *
+ * Nothing is installed when a path does not fit (the transport rejects such a name).
+ *
+ * @param[in] name  Pipe name / base path.
+ */
+static void stop_signals_install(const char *name) {
+  int n_in = snprintf(s_fifo_paths[0], sizeof(s_fifo_paths[0]), "%s.in", name);
+  int n_out = snprintf(s_fifo_paths[1], sizeof(s_fifo_paths[1]), "%s.out", name);
+
+  if (n_in > 0 && (size_t)n_in < sizeof(s_fifo_paths[0]) && n_out > 0 &&
+      (size_t)n_out < sizeof(s_fifo_paths[1])) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_stop_signal;
+    sigemptyset(&sa.sa_mask);
+    (void)sigaction(SIGINT, &sa, NULL);
+    (void)sigaction(SIGTERM, &sa, NULL);
+  }
+}
 #endif /* POSIX */
 
 /* Command Handlers ---------------------------------------------------------------------*/
@@ -371,6 +422,7 @@ static int run_named_server(const char *name) {
   printf("Named pipe server ready.\n");
   printf("  Pipe path : \\\\.\\pipe\\%s\n", name);
 #else
+  stop_signals_install(name);
   printf("Named pipe server ready.\n");
   printf("  Read FIFO : %s.in\n", name);
   printf("  Write FIFO: %s.out\n", name);
@@ -771,10 +823,11 @@ static int run_named_client(const char *name) {
 #endif /* POSIX relay */
 
 /*---------------------------------------------------------------------------------------
- * Anonymous Pipe Scripted Self-Demo
+ * Anonymous Pipe Interactive Demo
  *
- * Creates a pipe pair internally.  A background thread acts as a scripted
- * "client" feeding stdin into the CLI.  No external tools required.
+ * Creates a pipe pair internally and runs the CLI on one end; this process relays its
+ * stdin / stdout through the other end, so the session is used interactively from the
+ * terminal. No external tools required.
  *---------------------------------------------------------------------------------------*/
 
 /**
@@ -883,7 +936,7 @@ static void print_usage(const char *prog) {
           "  %s                       named pipe server (default name)\n"
           "  %s named [<name>]        named pipe server\n"
           "  %s client [<name>]       named pipe client (relay stdin/stdout)\n"
-          "  %s anon                  anonymous pipe self-demo (scripted)\n",
+          "  %s anon                  anonymous pipe demo (relay stdin/stdout)\n",
           prog, prog, prog, prog);
 }
 

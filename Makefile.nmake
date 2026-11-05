@@ -467,7 +467,7 @@ help:
     @echo    run-telnet                 Build and run telnet server (port 2323)
     @echo    run-tcp                    Build and run TCP server (port 2323)
     @echo    run-serial                 Build and run serial demo
-    @echo    run-pipe                   Build and run pipe demo (anonymous/scripted)
+    @echo    run-pipe                   Build and run pipe demo (anonymous pipe: interactive)
     @echo    clean                      Remove build\msvc\windows\ artefacts
     @echo    clean-all                  Remove entire build\ tree
     @echo    help                       Show this message

@@ -469,7 +469,7 @@ void setup_commands(void)
 
 ```c
 static int8_t my_handler(cli_struct_t *cli, const char *cmd,
-                         uint16_t argc, const char *argv[])
+                         cli_argc_t argc, const char *argv[])
 {
     // argv[0] = matched command word
     // argv[1..argc-1] = remaining tokens typed by user
@@ -618,7 +618,8 @@ void cli_task(void *arg)
             cli_start(cli); // begin a fresh session (cli_done() would discard the transport and commands)
         }
         // Other superloop work here ...
-        cli_sleep_ms(1000);
+        app_delay_ms(10); // your platform's delay (vTaskDelay, HAL_Delay, ...): short, so
+                          // typed characters are echoed without a noticeable lag
     }
 }
 ```

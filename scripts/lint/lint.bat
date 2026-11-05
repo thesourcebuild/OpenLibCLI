@@ -30,28 +30,47 @@ if /i "%~1"=="check"  set "MODE=check"
 if /i "%~1"=="fix"    set "MODE=fix"
 if /i "%~1"=="help"   goto :show_help
 
-:: Check for tools. Allow overriding by predefining CLANG_FORMAT_EXE/CLANG_TIDY_EXE.
-if not defined CLANG_FORMAT_EXE call :resolve_tool clang-format CLANG_FORMAT_EXE
-if not defined CLANG_FORMAT_EXE (
-    echo [ERROR] clang-format not found in PATH or Visual Studio LLVM.
-    set "FAIL=1"
-)
-if not defined CLANG_TIDY_EXE call :resolve_tool clang-tidy CLANG_TIDY_EXE
-if not defined CLANG_TIDY_EXE (
-    echo [ERROR] clang-tidy not found in PATH or Visual Studio LLVM.
-    set "FAIL=1"
-)
-if "!FAIL!"=="1" exit /b 1
+:: Only the tools this mode uses are required. Allow overriding by predefining
+:: CLANG_FORMAT_EXE/CLANG_TIDY_EXE.
+set "NEED_FORMAT=0"
+set "NEED_TIDY=0"
+if "!MODE!"=="all"    set "NEED_FORMAT=1"
+if "!MODE!"=="format" set "NEED_FORMAT=1"
+if not "!MODE!"=="format" set "NEED_TIDY=1"
 
-if "!MODE!"=="all"    goto :do_format
-if "!MODE!"=="format" goto :do_format
-goto :do_check
+if "!NEED_FORMAT!"=="1" (
+    if not defined CLANG_FORMAT_EXE call :resolve_tool clang-format CLANG_FORMAT_EXE
+    if not defined CLANG_FORMAT_EXE (
+        echo [ERROR] clang-format not found in PATH or Visual Studio LLVM.
+        set "FAIL=1"
+    )
+)
+if "!NEED_TIDY!"=="1" (
+    if not defined CLANG_TIDY_EXE call :resolve_tool clang-tidy CLANG_TIDY_EXE
+    if not defined CLANG_TIDY_EXE (
+        echo [ERROR] clang-tidy not found in PATH or Visual Studio LLVM.
+        set "FAIL=1"
+    )
+)
+if "!FAIL!"=="1" (
+    popd >nul
+    exit /b 1
+)
 
+set "STATUS=0"
+if "!NEED_FORMAT!"=="1" call :do_format
+if "!NEED_TIDY!"=="1" call :do_check
+popd >nul
+exit /b !STATUS!
+
+:: The project's own sources only (never build output or generated packages).
 :do_format
 echo [lint.bat] Formatting code with clang-format...
-powershell -ExecutionPolicy Bypass -Command ^
-    "Get-ChildItem -Include *.c,*.h -Recurse | ForEach-Object { & '%CLANG_FORMAT_EXE%' -i $_.FullName }"
-if "!MODE!"=="format" exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$fail = 0; Get-ChildItem -Path cli,examples,tests -Include *.c,*.h -Recurse | ForEach-Object { " ^
+    "  & '%CLANG_FORMAT_EXE%' -i $_.FullName; if ($LASTEXITCODE -ne 0) { $fail = 1 } }; exit $fail"
+if errorlevel 1 set "STATUS=1"
+goto :eof
 
 :do_check
 if "!MODE!"=="fix" (
@@ -62,15 +81,16 @@ if "!MODE!"=="fix" (
     set "EXTRA_FLAGS="
 )
 
-:: We define the include paths and some basic defines to match build.bat
-set "TIDY_FLAGS=-Icli -DWIN32 -D_WIN32"
+:: Compiled as the Windows builds compile them (C99, the library headers on the include path,
+:: the build defines). examples\linux is POSIX-only and is left out here.
+set "TIDY_FLAGS=-std=c99 -Icli -DWIN32 -D_WIN32 -D_CRT_SECURE_NO_WARNINGS"
 
-powershell -ExecutionPolicy Bypass -Command ^
-    "Get-ChildItem -Path src,transport,examples -Filter *.c -Recurse | ForEach-Object { " ^
-    "  Write-Host \"Checking: $($_.Name)\" -ForegroundColor Cyan; " ^
-    "  & '%CLANG_TIDY_EXE%' $_.FullName %EXTRA_FLAGS% -- %TIDY_FLAGS% " ^
-    "}"
-exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$fail = 0; Get-ChildItem -Path cli,examples\shared,examples\win_linux,tests -Filter *.c -Recurse | ForEach-Object { " ^
+    "  Write-Host \"Checking: $($_.FullName)\" -ForegroundColor Cyan; " ^
+    "  & '%CLANG_TIDY_EXE%' $_.FullName %EXTRA_FLAGS% -- %TIDY_FLAGS%; if ($LASTEXITCODE -ne 0) { $fail = 1 } }; exit $fail"
+if errorlevel 1 set "STATUS=1"
+goto :eof
 
 :resolve_tool
 set "%~2="
@@ -109,10 +129,10 @@ goto :eof
 echo.
 echo  Usage: scripts\lint\lint.bat [format^|check^|fix^|help]
 echo.
-echo  Commands:
+echo  Commands (on cli\, examples\ and tests\):
 echo    (none)    Run both format and check
-echo    format    Run clang-format on all .c and .h files
-echo    check     Run clang-tidy on all .c files
+echo    format    Run clang-format on the .c and .h files
+echo    check     Run clang-tidy on the .c files
 echo    fix       Run clang-tidy with -fix-errors
 echo    help      Show this message
 echo.

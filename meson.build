@@ -35,6 +35,12 @@ cc = meson.get_compiler('c')
 is_windows = host_machine.system() == 'windows'
 is_linux   = host_machine.system() == 'linux'
 
+# MSVC (and clang-cl) report the standard C functions used here (sscanf, ...) as deprecated
+# in favour of their _s variants; the CMake and NMake builds turn that off the same way.
+if cc.get_argument_syntax() == 'msvc'
+  add_project_arguments('-D_CRT_SECURE_NO_WARNINGS', language : 'c')
+endif
+
 # ── Feature-test macros: c99 makes glibc / musl hide POSIX (nanosleep, clock_gettime,
 #    lstat, mkfifo, ...) and BSD extras (flock); _DEFAULT_SOURCE restores the normal set.
 #    macOS and the BSDs show everything without a macro (a POSIX level would hide

@@ -5077,11 +5077,6 @@ static void cli_auth_prompt_username(cli_struct_t *cli) {
 }
 
 /**
- * @brief Test whether the current auth lockout period has expired.
- * @param[in] cli  Active CLI session.
- * @return @c true if the lockout has expired or is not active.
- */
-/**
  * @brief Test whether the current lockout is timed but has no clock to time it.
  * @param[in] cli  Active CLI session.
  * @return @c true when the lockout could never expire.
@@ -5094,6 +5089,11 @@ static bool cli_auth_lockout_unending(const cli_struct_t *cli) {
 #endif
 }
 
+/**
+ * @brief Test whether the current auth lockout period has expired.
+ * @param[in] cli  Active CLI session.
+ * @return @c true if the lockout has expired or is not active.
+ */
 static bool cli_auth_lockout_expired(const cli_struct_t *cli) {
   bool expired = True;
 
