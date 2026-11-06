@@ -264,8 +264,8 @@ scripts\build-helpers\build.bat
 :: build + run telnet server on port 2323
 scripts\build-helpers\build.bat run-telnet 
 
-:: build + run TCP server on port 2323
-scripts\build-helpers\build.bat run-tcp
+:: build + run TCP server on port 2323 (the TCP example is opt-in)
+scripts\build-helpers\build.bat BUILD_EXAMPLE_TCP=1 run-tcp
 
 :: build + run serial demo (stdin/stdout simulation)
 scripts\build-helpers\build.bat run-serial
@@ -288,8 +288,8 @@ chmod +x scripts/build-helpers/build.sh
 # build + run Telnet on custom port
 ./scripts/build-helpers/build.sh run-telnet 2323  
 
-# build + run TCP server on custom port
-./scripts/build-helpers/build.sh run-tcp 2323      
+# build + run TCP server on custom port (the TCP example is opt-in)
+./scripts/build-helpers/build.sh BUILD_EXAMPLE_TCP=1 run-tcp 2323
 
 # build + run Serial server
 ./scripts/build-helpers/build.sh run-serial
@@ -306,13 +306,13 @@ chmod +x scripts/build-helpers/build.sh
 mingw32-make CC=gcc PLATFORM=windows
 mingw32-make CC=gcc PLATFORM=windows run-serial
 mingw32-make CC=gcc PLATFORM=windows run-telnet
-mingw32-make CC=gcc PLATFORM=windows run-tcp
+mingw32-make CC=gcc PLATFORM=windows BUILD_EXAMPLE_TCP=1 run-tcp
 mingw32-make CC=gcc PLATFORM=windows clean
 
 # Linux / macOS
 make
 make run-telnet PORT=2323
-make run-tcp PORT=2323
+make BUILD_EXAMPLE_TCP=1 run-tcp PORT=2323   # the TCP example is opt-in
 make run-serial
 make clean
 make distclean
@@ -323,9 +323,10 @@ make CC=x86_64-w64-mingw32-gcc PLATFORM=windows
 # Cross-compile for ARM target(linux) from Linux host/target OS
 make CC=arm-linux-gnueabihf-gcc
 
-# Cross-compile for ARM bare-metal from Linux host/target OS
-# will only generate a static libary for ARM microcontrollers
-make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal
+# Cross-compile for ARM bare-metal from Linux host/target OS: only the static library is
+# built. TARGET_FLAGS selects the MCU (required: without it GCC builds ARM-state code that
+# a Cortex-M cannot run)
+make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal TARGET_FLAGS="-mcpu=cortex-m4 -mthumb"
 ```
 
 ### MSVC / NMake
@@ -336,12 +337,11 @@ Open a **Visual Studio x64 Native Tools Command Prompt** (or run `vcvars64.bat`)
 nmake /f Makefile.nmake              :: build all
 nmake /f Makefile.nmake lib          :: library only
 nmake /f Makefile.nmake telnet       :: telnet server example
-nmake /f Makefile.nmake tcp          :: TCP server example
+nmake /f Makefile.nmake BUILD_EXAMPLE_TCP=1 tcp       :: TCP server example (opt-in)
 nmake /f Makefile.nmake uart         :: embedded serial example
 nmake /f Makefile.nmake run-telnet   :: build + run telnet server
-nmake /f Makefile.nmake run-tcp      :: build + run TCP server
-for TCP run
-nmake /f Makefile.nmake run-serial     :: build + run serial demo
+nmake /f Makefile.nmake BUILD_EXAMPLE_TCP=1 run-tcp   :: build + run TCP server
+nmake /f Makefile.nmake run-serial   :: build + run serial demo
 nmake /f Makefile.nmake clean
 nmake /f Makefile.nmake distclean
 nmake /f Makefile.nmake help

@@ -10,9 +10,10 @@
 ::    build.bat mingw [args...]     Alias for gcc
 ::    build.bat cmake [args...]     CMake                 (build_cmake.bat)
 ::    build.bat meson [args...]     Meson                 (build_meson.bat)
-::    build.bat all [args...]       All available toolchains
+::    build.bat all [BUILD_EXAMPLE_*=0|1 ...]  All available toolchains
 ::
-::  All remaining arguments are passed through to the sub-script.
+::  All remaining arguments are passed through to the sub-script ('all' takes only the
+::  BUILD_EXAMPLE_* settings, the arguments every toolchain understands).
 :: =============================================================================
 setlocal enabledelayedexpansion
 set "SCRIPT_DIR=%~dp0"
@@ -75,6 +76,8 @@ echo.
 exit /b 1
 
 :dispatch_all
+call :check_all_args !REST!
+if !ERRORLEVEL! NEQ 0 exit /b 1
 echo [build] Running all available toolchains...
 
 call :try_vcvars
@@ -108,6 +111,29 @@ if !ERRORLEVEL! == 0 (
 
 echo [build] All toolchains done.
 exit /b 0
+
+:: --------------------------------------------------------------------------
+::  'all': every toolchain gets the same arguments, so only the settings all of them read
+::  the same way are taken (a make target would be a CMake error and Meson's build
+::  directory). cmd splits NAME=VALUE at the '=' unless it is quoted: both forms are taken.
+:: --------------------------------------------------------------------------
+:check_all_args
+if "%~1"=="" exit /b 0
+set "ARG_SHIFT=0"
+for %%N in (BUILD_EXAMPLE_TELNET BUILD_EXAMPLE_TCP BUILD_EXAMPLE_SERIAL BUILD_EXAMPLE_PIPE BUILD_EXAMPLE_UNIX_SOCKET) do (
+    if /i "%~1"=="%%N=0" set "ARG_SHIFT=1"
+    if /i "%~1"=="%%N=1" set "ARG_SHIFT=1"
+    if /i "%~1"=="%%N" if "%~2"=="0" set "ARG_SHIFT=2"
+    if /i "%~1"=="%%N" if "%~2"=="1" set "ARG_SHIFT=2"
+)
+if "!ARG_SHIFT!"=="0" (
+    echo [build] ERROR: 'all' takes only BUILD_EXAMPLE_*=0^|1 settings, which every toolchain understands.
+    echo [build]        '%~1' is for one toolchain: run that one with it ^(e.g. build.bat gcc %~1^).
+    exit /b 1
+)
+shift
+if "!ARG_SHIFT!"=="2" shift
+goto :check_all_args
 
 :: --------------------------------------------------------------------------
 ::  Visual Studio vcvars auto-initialisation
@@ -148,9 +174,11 @@ echo    scripts\build-helpers\build.bat gcc [args...]      GCC + GNU Make
 echo    scripts\build-helpers\build.bat mingw [args...]    Alias for gcc
 echo    scripts\build-helpers\build.bat cmake [args...]    CMake
 echo    scripts\build-helpers\build.bat meson [args...]    Meson
-echo    scripts\build-helpers\build.bat all [args...]      All available
+echo    scripts\build-helpers\build.bat all [BUILD_EXAMPLE_*=0^|1 ...]
+echo                                                       All available
 echo.
-echo  Arguments after the toolchain name are passed through.
+echo  Arguments after the toolchain name are passed through. 'all' takes only the
+echo  BUILD_EXAMPLE_* settings, the arguments every toolchain understands.
 echo  Run the sub-script directly for per-toolchain help:
 echo    build_msvc.bat help
 echo    build_mingw_gcc.bat help

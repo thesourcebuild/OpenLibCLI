@@ -53,10 +53,18 @@ endif
 # The shared library needs -DCLI_SHARED -DBUILD_LIB_SHARED so that
 # OPENLIBCLI_API in cli.h expands to __declspec(dllexport) on MSVC.
 # Without exported symbols the MSVC linker skips IMPLIB generation.
-openlibcli_lib = both_libraries(meson.project_name(), src,
-    include_directories : inc,
-    c_args : ['-DCLI_SHARED', '-DBUILD_LIB_SHARED'],
-    install : true)
+# A bare-metal target (host system 'none' in the cross file) has no shared libraries:
+# only the static one is built there.
+if host_machine.system() == 'none'
+  openlibcli_lib = static_library(meson.project_name(), src,
+      include_directories : inc,
+      install : true)
+else
+  openlibcli_lib = both_libraries(meson.project_name(), src,
+      include_directories : inc,
+      c_args : ['-DCLI_SHARED', '-DBUILD_LIB_SHARED'],
+      install : true)
+endif
 
 # ── Dependency object (for subproject / wrap consumers) ───────────────────
 openlibcli_dep = declare_dependency(

@@ -38,15 +38,28 @@ endif
 
 # -DCLI_SHARED -DBUILD_LIB_SHARED: OPENLIBCLI_API becomes __declspec(dllexport) on Windows;
 # without exported symbols MSVC produces no import library (as in the top-level build).
-openlibcli_lib = library(
-    meson.project_name(),
-    'src/cli.c',
-    'src/utils/cli_args_parse.c',
-    include_directories : include_directories('src'),
-    c_args : ['-DCLI_SHARED', '-DBUILD_LIB_SHARED'],
-    dependencies : platform_deps,
-    install : true,
-)
+# A bare-metal target (host system 'none' in the cross file) has no shared libraries: there
+# the library is always static, whatever default_library says.
+lib_src = files('src/cli.c', 'src/utils/cli_args_parse.c')
+lib_inc = include_directories('src')
+if host_machine.system() == 'none'
+  openlibcli_lib = static_library(
+      meson.project_name(),
+      lib_src,
+      include_directories : lib_inc,
+      dependencies : platform_deps,
+      install : true,
+  )
+else
+  openlibcli_lib = library(
+      meson.project_name(),
+      lib_src,
+      include_directories : lib_inc,
+      c_args : ['-DCLI_SHARED', '-DBUILD_LIB_SHARED'],
+      dependencies : platform_deps,
+      install : true,
+  )
+endif
 
 openlibcli_dep = declare_dependency(
     include_directories : include_directories('include/OpenLibCLI'),

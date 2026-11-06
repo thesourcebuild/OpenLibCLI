@@ -1194,7 +1194,11 @@ OPENLIBCLI_API void cli_init(cli_struct_t *cli, const char *hostname,
   cli->auth_username[0] = '\0';
 #endif
 
-  (void)cli_strlcpy(cli->hostname, hostname ? hostname : "cli", CLI_MAX_PROMPT_LEN);
+  /* "cli" stays when no hostname is given or it does not fit (see cli_set_hostname). */
+  (void)cli_strlcpy(cli->hostname, "cli", CLI_MAX_PROMPT_LEN);
+  if (hostname != NULL) {
+    (void)cli_set_hostname(cli, hostname);
+  }
 #if CLI_ENABLE_HISTORY && CLI_HISTORY_INDEX_SELECTION
   cli->history_replay = (cli_history_idx_t)-1;
 #endif
@@ -1289,21 +1293,36 @@ OPENLIBCLI_API void cli_set_ansi_supported(cli_struct_t *cli, bool enabled) {
   }
 }
 
-OPENLIBCLI_API void cli_set_hostname(cli_struct_t *cli, const char *hostname) {
-  if (cli != NULL) {
-    (void)cli_strlcpy(cli->hostname, (hostname != NULL) ? hostname : "", CLI_MAX_PROMPT_LEN);
+OPENLIBCLI_API int8_t cli_set_hostname(cli_struct_t *cli, const char *hostname) {
+  int8_t rc = CLI_ERR;
+  const char *value = (hostname != NULL) ? hostname : "";
+
+  /* A name that does not fit is refused, not cut: the prompt would show another name. */
+  if (cli != NULL && strlen(value) < (size_t)CLI_MAX_PROMPT_LEN) {
+    (void)cli_strlcpy(cli->hostname, value, CLI_MAX_PROMPT_LEN);
+    rc = CLI_OK;
   }
+
+  return rc;
 }
 
-OPENLIBCLI_API void cli_set_banner(cli_struct_t *cli, const char *banner) {
+OPENLIBCLI_API int8_t cli_set_banner(cli_struct_t *cli, const char *banner) {
+  int8_t rc = CLI_ERR;
+
 #if CLI_ENABLE_BANNER
-  if (cli != NULL) {
-    (void)cli_strlcpy(cli->banner, (banner != NULL) ? banner : "", CLI_MAX_BANNER_LEN);
+  const char *value = (banner != NULL) ? banner : "";
+
+  /* A banner that does not fit is refused, not cut off in the middle of a line. */
+  if (cli != NULL && strlen(value) < (size_t)CLI_MAX_BANNER_LEN) {
+    (void)cli_strlcpy(cli->banner, value, CLI_MAX_BANNER_LEN);
+    rc = CLI_OK;
   }
 #else
   (void)cli;
   (void)banner;
 #endif
+
+  return rc;
 }
 
 OPENLIBCLI_API void cli_set_userdata(cli_struct_t *cli, void *data) {
@@ -2817,6 +2836,12 @@ static void cli_print_str(cli_struct_t *cli, const char *s) {
 }
 #endif
 
+/**
+ * @brief While a recalled history entry is shown, keep the edit just made to it as the
+ *        line restored at the tip (@c CLI_HISTORY_RESTORE_PREBROWSE_LINE), so moving on
+ *        through the history does not lose it.
+ * @param[in] cli  Active CLI session.
+ */
 static void cli_history_capture_edited_preview(cli_struct_t *cli) {
 #if CLI_ENABLE_HISTORY && CLI_HISTORY_RESTORE_PREBROWSE_LINE
   if (cli != NULL && cli->history_nav > 0) {
@@ -3326,7 +3351,9 @@ static void cli_history_clear_displayed_input(cli_struct_t *cli) {
  * @brief Move the history cursor backward or forward by one entry.
  *
  * When moving up from the tip, the current editable line is saved into
- * @c history_saved so it can be restored when navigating back down to the tip.
+ * @c history_saved so it can be restored when navigating back down to the tip; editing a
+ * recalled entry replaces it (@c cli_history_capture_edited_preview()), so that edit is
+ * what returns at the tip.
  * Rendering uses an in-place erase/write sequence so the prompt itself is not
  * redrawn.
  *
@@ -3559,8 +3586,11 @@ static bool cli_cmd_selectable(const cli_struct_t *cli, const cli_cmd_struct_t *
 }
 
 /**
- * @brief Return the keyword of @p cmd (name first, then aliases) that starts with
- *        @p word, ignoring case.
+ * @brief Return the keyword of @p cmd that @p word matched, ignoring case: the name or
+ *        alias equal to @p word, otherwise the first (name, then aliases) starting with it.
+ *
+ * An exact keyword comes first: "int" typed for a command named "interface" with the
+ * alias "int" matched the alias, and completion must not widen it to the name.
  *
  * @param[in] cmd   Command node.
  * @param[in] word  Typed (possibly partial) word; "" matches the name.
@@ -3570,7 +3600,14 @@ static bool cli_cmd_selectable(const cli_struct_t *cli, const cli_cmd_struct_t *
 static const char *cli_cmd_prefix_text(const cli_cmd_struct_t *cmd, const char *word) {
   const char *text = NULL;
 
-  if (cli_case_prefix_match(cmd->name, word)) {
+#if CLI_ENABLE_ALIASES
+  for (cli_len_t a = 0; a < cmd->num_aliases && text == NULL; a++) {
+    if (cli_case_equal(cmd->aliases[a], word)) {
+      text = cmd->aliases[a];
+    }
+  }
+#endif
+  if (text == NULL && cli_case_prefix_match(cmd->name, word)) {
     text = cmd->name;
   }
 #if CLI_ENABLE_ALIASES
@@ -5641,13 +5678,38 @@ static void cli_nav_reset(cli_struct_t *cli) {
  */
 static void cli_nav_relocate(cli_struct_t *cli, cli_cmd_handle_t removed,
                              cli_cmd_handle_t replacement) {
+  bool moved = False;
+
   if (cli_is_within(cli, cli->context, removed)) {
     cli->context = replacement;
+    moved = True;
   }
   for (uint8_t i = 0U; i < cli->nav_depth; i++) {
     if (cli_is_within(cli, cli->nav_stack[i].context, removed)) {
       cli->nav_stack[i].context = replacement;
+      moved = True;
     }
+  }
+
+  if (moved) {
+    /* A level now identical to the level above it (or to the current state) records a
+     * submenu that no longer exists: 'exit' would leave it without changing anything.
+     * Such levels are dropped. */
+    uint8_t kept = 0U;
+    for (uint8_t i = 0U; i < cli->nav_depth; i++) {
+      const cli_nav_frame_struct_t *f = &cli->nav_stack[i];
+      bool last = (i + 1U == cli->nav_depth);
+      cli_mode_t above_mode = last ? cli->mode : cli->nav_stack[i + 1U].mode;
+      cli_cmd_handle_t above_context = last ? cli->context : cli->nav_stack[i + 1U].context;
+      cli_priv_t above_privilege = last ? cli->privilege : cli->nav_stack[i + 1U].privilege;
+
+      if (f->mode != above_mode || f->context != above_context ||
+          f->privilege != above_privilege) {
+        cli->nav_stack[kept] = *f;
+        kept++;
+      }
+    }
+    cli->nav_depth = kept;
   }
 }
 

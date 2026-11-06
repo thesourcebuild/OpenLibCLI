@@ -33,7 +33,7 @@
 /** @brief MOTD banner for the UART / serial transport demo. */
 #define CLI_DEMO_BANNER_SERIAL                                                                     \
   "************************************************************\r\n"                               \
-  "*             OpenLibCLI  --  Serial (UART)               *\r\n"                                \
+  "*             OpenLibCLI  --  Serial (UART)                *\r\n"                               \
   "*         Pure-C, 100% Static Allocation CLI Engine        *\r\n"                               \
   "************************************************************"
 

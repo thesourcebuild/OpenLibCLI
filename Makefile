@@ -19,7 +19,7 @@
 #  cli_server_serial  Build the embedded / Serial example
 #  cli_server_pipe    Build the pipe server example
 #  cli_server_unix_socket  Build the UNIX domain socket server example
-#  embedded-baremetal  Cross-compile the library for bare-metal (set CC)
+#  embedded-baremetal  Cross-compile the library for bare-metal (set CC and TARGET_FLAGS)
 #  run-telnet     Build + run telnet server (PORT=2323)
 #  run-tcp        Build + run TCP server (PORT=2323)
 #  run-serial     Build + run embedded Serial demo
@@ -32,9 +32,8 @@
 #  Toolchain overrides
 #  -------------------
 #  make CC=clang
-#  make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal
+#  make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal TARGET_FLAGS="-mcpu=cortex-m4 -mthumb"
 #  make CC=x86_64-w64-mingw32-gcc PLATFORM=windows
-#  make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal
 #  make PORT=9999 run-telnet
 #
 #  For MSVC use:  nmake /f Makefile.nmake
@@ -136,13 +135,9 @@ ifeq ($(BUILD_ASAN),1)
 BUILD_DIR := $(BUILD_DIR)-asan
 endif
 
-EMBED_DIR := $(BUILD_BASE)/embedded-baremetal
 BIN_DIR   := $(BUILD_DIR)/binaries
 LIB_DIR   := $(BUILD_DIR)/libs
 OBJ_DIR   := $(BUILD_DIR)/obj
-EMBED_BIN_DIR := $(EMBED_DIR)/binaries
-EMBED_LIB_DIR := $(EMBED_DIR)/libs
-EMBED_OBJ_DIR := $(EMBED_DIR)/obj
 
 # ---------------------------------------------------------------------------
 #  Compiler flags
@@ -151,7 +146,17 @@ CFLAGS ?= -std=c99 -Wall -Wextra -Werror -Wpedantic -Wshadow \
            -Wstrict-prototypes -Wmissing-prototypes \
            -Wno-unused-parameter \
             -O2 -g -ffunction-sections -fdata-sections
-CFLAGS += -I$(INC_DIR)
+# The flags below are needed whatever CFLAGS is: 'override' adds them to a CFLAGS given on
+# the command line too (a plain += would be ignored for it).
+override CFLAGS += -I$(INC_DIR)
+
+# CPU / ABI flags of the target, e.g. TARGET_FLAGS="-mcpu=cortex-m4 -mthumb". Required for
+# the bare-metal library: the MCU decides them, and without them the compiler builds for its
+# default CPU (ARM state for arm-none-eabi-gcc, which a Cortex-M cannot run).
+TARGET_FLAGS ?=
+override CFLAGS += $(TARGET_FLAGS)
+target_flags_required = $(if $(strip $(TARGET_FLAGS)),,$(error TARGET_FLAGS is not set: give \
+    the MCU's CPU flags, e.g. TARGET_FLAGS="-mcpu=cortex-m4 -mthumb"))
 
 # Feature-test macros: -std=c99 makes glibc / musl hide POSIX (nanosleep, clock_gettime,
 # lstat, mkfifo, ...) and the BSD extras the examples use (flock). _DEFAULT_SOURCE gives
@@ -159,7 +164,7 @@ CFLAGS += -I$(INC_DIR)
 # POSIX level there would hide getpeereid() and SO_NOSIGPIPE instead. Chosen by the target
 # platform, so a cross build for Linux gets it too.
 ifeq ($(PLATFORM),linux)
-CFLAGS += -D_DEFAULT_SOURCE
+override CFLAGS += -D_DEFAULT_SOURCE
 endif
 
 # Linker flags for host examples (Apple's linker spells them differently)
@@ -172,8 +177,8 @@ MAP_FLAG     := -Wl,-Map,
 endif
 
 ifeq ($(BUILD_ASAN),1)
-CFLAGS    += -fsanitize=address -fno-omit-frame-pointer -g
-LDFLAGS   += -fsanitize=address
+override CFLAGS  += -fsanitize=address -fno-omit-frame-pointer -g
+override LDFLAGS += -fsanitize=address
 endif
 
 ARFLAGS      := rcs
@@ -208,14 +213,16 @@ endif
 # ---------------------------------------------------------------------------
 #  Embedded bare-metal overrides — only the static library, no host examples
 # ---------------------------------------------------------------------------
+# ('override': a BUILD_* given on the command line, or passed down from a host make, cannot
+# turn on what an MCU has no use for)
 ifeq ($(PLATFORM),embedded-baremetal)
-BUILD_EXAMPLE_TELNET = 0
-BUILD_EXAMPLE_TCP    = 0
-BUILD_EXAMPLE_SERIAL = 0
-BUILD_EXAMPLE_PIPE   = 0
-BUILD_EXAMPLE_UNIX_SOCKET = 0
-BUILD_LIB_STATIC     = 1
-BUILD_LIB_SHARED     = 0
+override BUILD_EXAMPLE_TELNET = 0
+override BUILD_EXAMPLE_TCP    = 0
+override BUILD_EXAMPLE_SERIAL = 0
+override BUILD_EXAMPLE_PIPE   = 0
+override BUILD_EXAMPLE_UNIX_SOCKET = 0
+override BUILD_LIB_STATIC     = 1
+override BUILD_LIB_SHARED     = 0
 endif
 
 # ---------------------------------------------------------------------------
@@ -270,7 +277,6 @@ TCP_BIN      := $(BIN_DIR)/cli_server_tcp$(EXE_EXT)
 SERIAL_BIN   := $(BIN_DIR)/cli_server_serial$(EXE_EXT)
 PIPE_BIN     := $(BIN_DIR)/cli_server_pipe$(EXE_EXT)
 UNIX_SOCK_BIN := $(BIN_DIR)/cli_server_unix_socket$(EXE_EXT)
-EMBED_LIB    := $(EMBED_LIB_DIR)/libopenlibcli.a
 
 SHARED_CFLAGS := $(CFLAGS) -DCLI_SHARED -DBUILD_LIB_SHARED
 ifneq ($(PLATFORM),windows)
@@ -289,7 +295,6 @@ LIB_SRCS := $(SRC_DIR)/cli.c $(SRC_DIR)/utils/cli_args_parse.c
 
 LIB_OBJS        := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(LIB_SRCS))
 LIB_SHARED_OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/shared/%.o,$(LIB_SRCS))
-EMBED_LIB_OBJS  := $(patsubst $(SRC_DIR)/%.c,$(EMBED_OBJ_DIR)/%.o,$(LIB_SRCS))
 
 # Example objects. Compiled for the library they link (CLI_SHARED or not), so each link
 # mode has its own directory: switching BUILD_LIB_SHARED never mixes the two.
@@ -348,6 +353,10 @@ endif
 #  Default target — host platform
 # ---------------------------------------------------------------------------
 .PHONY: all
+ifeq ($(PLATFORM),embedded-baremetal)
+# Only the static library for the MCU: no binaries, map files or run targets to report.
+all: embedded-baremetal
+else
 all: $(ALL_HOST_TARGETS)
 	@$(call say,)
 	@$(call say,Build complete  [PLATFORM=$(PLATFORM)  CC=$(CC)])
@@ -404,6 +413,7 @@ ifneq ($(PLATFORM),windows)
 	@$(call say,  make run-unix-socket)
 endif
 endif
+endif
 
 # ---------------------------------------------------------------------------
 #  Static library  (host)
@@ -443,6 +453,9 @@ $(EX_OBJ_DIR)/%.o: $(EXAMPLE_DIR)/%.c
 	$(CC) $(EXAMPLE_CFLAGS) -MMD -MP -c $< -o $@
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+ifeq ($(PLATFORM),embedded-baremetal)
+	$(target_flags_required)
+endif
 	@$(call mkdir_p,$(@D))
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
@@ -553,43 +566,30 @@ endif
 # ---------------------------------------------------------------------------
 #  Embedded cross-compile target  →  build/gcc/embedded-baremetal/libs/libopenlibcli.a
 #
-#  Usage:
-#    make CC=arm-none-eabi-gcc embedded-baremetal   # CC: the cross-compiler (there is no default)
-#    make CC=riscv32-unknown-elf-gcc embedded-baremetal
-#    make CFLAGS="-mcpu=cortex-m0 -mthumb -Os -Icli" embedded-baremetal
+#  Usage (CC: the cross-compiler, TARGET_FLAGS: the MCU's CPU flags; both required):
+#    make CC=arm-none-eabi-gcc TARGET_FLAGS="-mcpu=cortex-m4 -mthumb" embedded-baremetal
+#    make CC=riscv32-unknown-elf-gcc TARGET_FLAGS="-march=rv32imac -mabi=ilp32" embedded-baremetal
+#    make CC=arm-none-eabi-gcc TARGET_FLAGS="-mcpu=cortex-m0 -mthumb" CFLAGS="-std=c99 -Os" \
+#         embedded-baremetal
 # ---------------------------------------------------------------------------
 .PHONY: embedded-baremetal
 ifeq ($(PLATFORM),embedded-baremetal)
 embedded-baremetal: lib
-else
-embedded-baremetal: $(EMBED_LIB)
-endif
 	@$(call say,)
 	@$(call say,Embedded bare-metal build complete  [CC=$(CC)])
-ifeq ($(PLATFORM),embedded-baremetal)
 	@$(call say,  Output dir : $(BUILD_DIR)/)
 	@$(call say,  Libraries  : $(LIB_DIR)/)
 	@$(call say,  Objects    : $(OBJ_DIR)/)
 	@$(call say,  Library    : $(STATIC_LIB_OUT))
-else
-	@$(call say,  Output dir : $(EMBED_DIR)/)
-	@$(call say,  Libraries  : $(EMBED_LIB_DIR)/)
-	@$(call say,  Objects    : $(EMBED_OBJ_DIR)/)
-	@$(call say,  Library    : $(EMBED_LIB))
-endif
 	@$(call say,)
-	@$(call say,  Link this library into your MCU firmware and implement)
-	@$(call say,  the serial callbacks via cli_serial_init().)
-
-ifneq ($(PLATFORM),embedded-baremetal)
-$(EMBED_LIB): $(EMBED_LIB_OBJS) | $(EMBED_LIB_DIR)
-	$(AR) $(ARFLAGS) $@ $^
-
-$(EMBED_OBJ_DIR)/%.o: $(SRC_DIR)/%.c
-	@$(call mkdir_p,$(@D))
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
-
--include $(EMBED_LIB_OBJS:.o=.d)
+	@$(call say,  Link this library into your MCU firmware: fill a cli_transport_struct_t)
+	@$(call say,  with your UART functions and pass it to cli_init().)
+else
+# From a host platform: the same build as PLATFORM=embedded-baremetal, in a make of its own,
+# so no host flag (_DEFAULT_SOURCE, AddressSanitizer) reaches the MCU objects. CC, CFLAGS and
+# TARGET_FLAGS given here are passed down.
+embedded-baremetal:
+	@$(MAKE) --no-print-directory PLATFORM=embedded-baremetal BUILD_ASAN=0 embedded-baremetal
 endif
 
 # ---------------------------------------------------------------------------
@@ -683,7 +683,7 @@ endif
 # ---------------------------------------------------------------------------
 #  Create output directories
 # ---------------------------------------------------------------------------
-$(sort $(BUILD_DIR) $(BIN_DIR) $(LIB_DIR) $(EMBED_DIR) $(EMBED_LIB_DIR)):
+$(sort $(BUILD_DIR) $(BIN_DIR) $(LIB_DIR)):
 	@$(call mkdir_p,$@)
 
 
@@ -747,7 +747,7 @@ help:
 	@$(call say,  cli_server_serial  Serial server example (host simulation))
 	@$(call say,  cli_server_pipe    Named/anonymous pipe server example)
 	@$(call say,  cli_server_unix_socket  UNIX domain socket server (POSIX only))
-	@$(call say,  embedded-baremetal  Cross-compile for bare-metal -> build/gcc/embedded-baremetal/)
+	@$(call say,  embedded-baremetal  Cross-compile for bare-metal -> build/gcc/embedded-baremetal/ (set CC and TARGET_FLAGS))
 	@$(call say,  asan           Build everything with AddressSanitizer (host only))
 	@$(call say,)
 	@$(call say,Run targets:)
@@ -763,6 +763,7 @@ help:
 	@$(call say,)
 	@$(call say,Variables:)
 	@$(call say,  PLATFORM=windows|linux|macos|embedded-baremetal  (auto-detected))
+	@$(call say,  TARGET_FLAGS=...                CPU flags of the target  (required for embedded-baremetal))
 	@$(call say,  BUILD_EXAMPLE_TELNET=0|1       Enable Telnet transport and telnet demo)
 	@$(call say,  BUILD_EXAMPLE_TCP=0|1          Enable TCP transport and tcp demo)
 	@$(call say,  BUILD_EXAMPLE_SERIAL=0|1       Enable generic serial transport and serial demo)
@@ -781,7 +782,7 @@ help:
 	@$(call say,  make run-telnet PORT=9999)
 	@$(call say,  make CC=clang)
 	@$(call say,  make asan)
-	@$(call say,  make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal)
+	@$(call say,  make CC=arm-none-eabi-gcc PLATFORM=embedded-baremetal TARGET_FLAGS="-mcpu=cortex-m4 -mthumb")
 	@$(call say,  make CC=x86_64-w64-mingw32-gcc PLATFORM=windows)
 	@$(call say,)
 	@$(call say,MSVC / NMake:  nmake /f Makefile.nmake [help])

@@ -21,12 +21,33 @@ pushd "%SCRIPT_DIR%..\.." >nul
 :: --------------------------------------------------------------------------
 set "TARGET="
 set "BUILD_VARS="
+set "RUN_PORT="
 
 :parse_args
 if "%~1"=="" goto :done_args
 if /i "%~1"=="help"       goto :show_help
 if /i "%~1"=="--help"     goto :show_help
 if /i "%~1"=="-h"         goto :show_help
+
+:: run-telnet / run-tcp [port], or PORT=<n> (cmd splits it at the '=' unless it is quoted)
+set "ARG=%~1"
+if /i "!ARG:~0,5!"=="PORT=" (
+    set "RUN_PORT=!ARG:~5!"
+    shift
+    goto :parse_args
+)
+if /i "%~1"=="PORT" if not "%~2"=="" (
+    set "RUN_PORT=%~2"
+    shift
+    shift
+    goto :parse_args
+)
+echo(%~1| findstr /r /x "[0-9][0-9]*" >nul
+if !ERRORLEVEL! == 0 (
+    set "RUN_PORT=%~1"
+    shift
+    goto :parse_args
+)
 
 if /i "%~1"=="BUILD_EXAMPLE_TELNET" goto :set_cli_build_from_next
 if /i "%~1"=="BUILD_EXAMPLE_TCP" goto :set_cli_build_from_next
@@ -91,6 +112,7 @@ if !ERRORLEVEL! NEQ 0 (
 echo [build_msvc] Toolchain  : MSVC  (cl.exe)
 echo [build_msvc] Build tool : nmake /f Makefile.nmake
 echo [build_msvc] Output dir : build\msvc\windows\
+if defined RUN_PORT set "BUILD_VARS=!BUILD_VARS! PORT=!RUN_PORT!"
 if not "!BUILD_VARS!"=="" echo [build_msvc] Build vars  : !BUILD_VARS!
 echo [build_msvc] Target     : !TARGET!
 echo.
@@ -144,7 +166,7 @@ echo    build\msvc\windows\libs
 echo    build\msvc\windows\obj
 echo    build\msvc\windows\*.map
 echo.
-echo  Usage: scripts\build-helpers\build_msvc.bat [target] [BUILD_EXAMPLE_*=0^|1 ...]
+echo  Usage: scripts\build-helpers\build_msvc.bat [target] [BUILD_EXAMPLE_*=0^|1 ...] [port]
 echo.
 echo  Targets:
 echo    (none)        Build the shared library and examples  [default; BUILD_LIB_STATIC=1 adds the static library]
@@ -153,8 +175,8 @@ echo    shared        Shared library only
 echo    telnet        Telnet server  (build\msvc\windows\binaries\cli_server_telnet.exe)
 echo    tcp           TCP server   (build\msvc\windows\binaries\cli_server_tcp.exe)
 echo    uart          Serial server demo  (build\msvc\windows\binaries\cli_server_serial.exe)
-echo    run-telnet    Build + run telnet server on port 2323
-echo    run-tcp       Build + run TCP server on port 2323
+echo    run-telnet [P]  Build + run telnet server on port P  (default 2323; or PORT=P)
+echo    run-tcp [P]     Build + run TCP server on port P     (default 2323; or PORT=P)
 echo    run-serial      Build + run serial / stdin demo
 echo    clean         Remove build\msvc\windows\ artefacts
 echo    clean-all     Remove entire build\ tree
@@ -170,6 +192,7 @@ echo.
 echo  Examples:
 echo    scripts\build-helpers\build_msvc.bat
 echo    scripts\build-helpers\build_msvc.bat BUILD_EXAMPLE_TCP=1
+echo    scripts\build-helpers\build_msvc.bat run-telnet 9999
 echo    scripts\build-helpers\build_msvc.bat lib
 echo.
 exit /b 0

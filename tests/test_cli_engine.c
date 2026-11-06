@@ -889,7 +889,10 @@ static void test_history_ring_evicts_oldest(void) {
   char long_line[XS + 4];
   for (int i = 0; i < 20; i++) {
     memset(long_line, 'x', XS);
-    snprintf(&long_line[XS], sizeof(long_line) - (size_t)XS, "%02d\r", i);
+    long_line[XS] = (char)('0' + i / 10); /* two-digit entry number */
+    long_line[XS + 1] = (char)('0' + i % 10);
+    long_line[XS + 2] = '\r';
+    long_line[XS + 3] = '\0';
     type(long_line);
   }
   ASSERT_TRUE(s_cli.history_count >= CLI_HISTORY_BUF_SIZE / (XS + 3) - 1);
@@ -1868,6 +1871,70 @@ static void test_escape_parameter_saturates(void) {
   TEST_END();
 }
 
+static void test_hostname_that_does_not_fit(void) {
+  cli_transport_struct_t tp;
+  char name[CLI_MAX_PROMPT_LEN + 1];
+
+  TEST_START("hostname_that_does_not_fit");
+  session_new();
+  session_start();
+
+  /* The longest name that fits is taken; one more character is refused, the old name
+   * stays (a cut name would show another name in the prompt). */
+  memset(name, 'h', sizeof(name));
+  name[CLI_MAX_PROMPT_LEN - 1] = '\0';
+  ASSERT_EQ(cli_set_hostname(&s_cli, name), CLI_OK);
+  ASSERT_STR_EQ(s_cli.hostname, name);
+  ASSERT_EQ(cli_set_hostname(&s_cli, "rtr"), CLI_OK);
+  name[CLI_MAX_PROMPT_LEN - 1] = 'h';
+  name[CLI_MAX_PROMPT_LEN] = '\0';
+  ASSERT_EQ(cli_set_hostname(&s_cli, name), CLI_ERR);
+  ASSERT_STR_EQ(s_cli.hostname, "rtr");
+  out_clear();
+  type("\r");
+  ASSERT_OUT("rtr> ");
+  ASSERT_EQ(cli_set_hostname(NULL, "x"), CLI_ERR);
+
+  /* cli_init() keeps its default for a name that does not fit. */
+  memset(&tp, 0, sizeof(tp));
+  tp.available = t_available;
+  tp.read = t_read;
+  tp.write = t_write;
+  cli_init(&s_cli, name, &tp, NULL, s_pool, TEST_POOL_SIZE);
+  ASSERT_STR_EQ(s_cli.hostname, "cli");
+  TEST_END();
+}
+
+static void test_banner_that_does_not_fit(void) {
+#if CLI_ENABLE_BANNER
+  char text[CLI_MAX_BANNER_LEN + 1];
+#endif
+
+  TEST_START("banner_that_does_not_fit");
+  session_new();
+
+#if CLI_ENABLE_BANNER
+  /* The longest banner that fits is taken; one more character is refused, the old banner
+   * stays (a cut banner would end in the middle of a line). */
+  memset(text, 'b', sizeof(text));
+  text[CLI_MAX_BANNER_LEN - 1] = '\0';
+  ASSERT_EQ(cli_set_banner(&s_cli, text), CLI_OK);
+  ASSERT_STR_EQ(s_cli.banner, text);
+  ASSERT_EQ(cli_set_banner(&s_cli, "Welcome"), CLI_OK);
+  text[CLI_MAX_BANNER_LEN - 1] = 'b';
+  text[CLI_MAX_BANNER_LEN] = '\0';
+  ASSERT_EQ(cli_set_banner(&s_cli, text), CLI_ERR);
+  ASSERT_STR_EQ(s_cli.banner, "Welcome");
+  ASSERT_EQ(cli_set_banner(&s_cli, NULL), CLI_OK);
+  ASSERT_STR_EQ(s_cli.banner, "");
+  ASSERT_EQ(cli_set_banner(NULL, "x"), CLI_ERR);
+#else
+  /* No banner storage: the setter reports that it cannot keep one. */
+  ASSERT_EQ(cli_set_banner(&s_cli, "Welcome"), CLI_ERR);
+#endif
+  TEST_END();
+}
+
 static void test_registration_reports_failures(void) {
   cli_transport_struct_t tp;
   cli_cmd_struct_t small_pool[4];
@@ -2740,6 +2807,52 @@ static void test_time_source_change_keeps_idle(void) {
 }
 #endif
 
+/* Round 12 regressions -----------------------------------------------------------------*/
+
+#if CLI_ENABLE_ALIASES && CLI_ENABLE_TAB_COMPLETION
+static void test_tab_keeps_exact_alias(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("tab_keeps_exact_alias");
+  session_new();
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "interface", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY,
+                      "if");
+  ASSERT_EQ(cli_cmd_add_alias(&s_cli, h, "int"), CLI_OK);
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "internal", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY,
+                        "");
+  session_start();
+
+  /* "int" is a complete keyword (the alias): Tab lists the candidates instead of widening
+   * it to "inter", which would no longer name any command. */
+  type("int\t");
+  ASSERT_STR_EQ(s_cli.input, "int");
+  ASSERT_OUT("interface");
+  ASSERT_OUT("internal");
+  out_clear();
+  type("\r");
+  ASSERT_OUT("RAN:interface");
+  TEST_END();
+}
+#endif
+
+static void test_exit_after_current_submenu_removed(void) {
+  cli_cmd_handle_t net;
+
+  TEST_START("exit_after_current_submenu_removed");
+  session_new();
+  net = cli_add_command(&s_cli, CLI_CMD_ROOT, "net", cmd_name, CLI_PRIV_USER, CLI_MODE_EXEC, "");
+  (void)cli_add_command(&s_cli, net, "ping", cmd_name, CLI_PRIV_USER, CLI_MODE_EXEC, "");
+  session_start();
+
+  type("net\r");
+  ASSERT_EQ(s_cli.context, net);
+  ASSERT_EQ(cli_remove_command(&s_cli, net), CLI_OK);
+  ASSERT_EQ(s_cli.context, CLI_CMD_ROOT);
+  ASSERT_EQ(s_cli.nav_depth, 0); /* the level of the removed submenu is gone */
+  ASSERT_EQ(type("exit\r"), CLI_ERR_QUIT); /* at the root: the first exit closes */
+  TEST_END();
+}
+
 static void test_null_safety(void) {
   TEST_START("null_safety");
   session_new();
@@ -2883,6 +2996,8 @@ int main(void) {
   RUN_SUITE(test_ctrl_d_output_like_quit);
   RUN_SUITE(test_exec_from_outside_redraws);
   RUN_SUITE(test_escape_parameter_saturates);
+  RUN_SUITE(test_hostname_that_does_not_fit);
+  RUN_SUITE(test_banner_that_does_not_fit);
   RUN_SUITE(test_registration_reports_failures);
 #if CLI_ENABLE_AUTH && CLI_ENABLE_IDLE_TIMEOUT
   RUN_SUITE(test_relogin_requested_during_restart);
@@ -2948,6 +3063,10 @@ int main(void) {
 #if CLI_ENABLE_IDLE_TIMEOUT
   RUN_SUITE(test_time_source_change_keeps_idle);
 #endif
+#if CLI_ENABLE_ALIASES && CLI_ENABLE_TAB_COMPLETION
+  RUN_SUITE(test_tab_keeps_exact_alias);
+#endif
+  RUN_SUITE(test_exit_after_current_submenu_removed);
 
   printf("\n--- robustness ---\n");
   RUN_SUITE(test_write_error_ends_session);

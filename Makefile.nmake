@@ -70,6 +70,11 @@ BUILD_LIB_STATIC = 0
 BUILD_LIB_SHARED = 1
 !ENDIF
 
+# Port of run-telnet / run-tcp (as in the GNU Makefile)
+!IFNDEF PORT
+PORT = 2323
+!ENDIF
+
 # ---------------------------------------------------------------------------
 #  Toolchain
 # ---------------------------------------------------------------------------
@@ -385,7 +390,7 @@ pipe:
 # ---------------------------------------------------------------------------
 !IF "$(BUILD_EXAMPLE_TELNET)" == "1"
 run-telnet: telnet
-    @$(TELNET_BIN) 2323
+    @$(TELNET_BIN) $(PORT)
 !ELSE
 run-telnet:
     @echo run-telnet requires BUILD_EXAMPLE_TELNET=1.
@@ -403,7 +408,7 @@ run-serial:
 
 !IF "$(BUILD_EXAMPLE_TCP)" == "1"
 run-tcp: tcp
-    @$(TCP_BIN) 2323
+    @$(TCP_BIN) $(PORT)
 !ELSE
 run-tcp:
     @echo run-tcp requires BUILD_EXAMPLE_TCP=1.
@@ -464,8 +469,8 @@ help:
     @echo    uart                       Serial server example
     @echo    pipe                       Named/anonymous pipe server example
     @echo    (unix socket example is POSIX-only; use GNU make on Linux/macOS)
-    @echo    run-telnet                 Build and run telnet server (port 2323)
-    @echo    run-tcp                    Build and run TCP server (port 2323)
+    @echo    run-telnet                 Build and run telnet server (port PORT, default 2323)
+    @echo    run-tcp                    Build and run TCP server (port PORT, default 2323)
     @echo    run-serial                 Build and run serial demo
     @echo    run-pipe                   Build and run pipe demo (anonymous pipe: interactive)
     @echo    clean                      Remove build\msvc\windows\ artefacts
@@ -480,6 +485,7 @@ help:
     @echo    BUILD_EXAMPLE_UNIX_SOCKET=0^|1 Enable UNIX socket transport (POSIX-only demo)
     @echo    BUILD_LIB_STATIC=0^|1          Build static library  (default: 0)
     @echo    BUILD_LIB_SHARED=0^|1          Build shared library  (default: 1)
+    @echo    PORT=2323                     Port of run-telnet / run-tcp  (default: 2323)
     @echo.
     @echo  Usage (recommended):
     @echo    Use the build wrapper which auto-initialises Visual Studio:
@@ -488,5 +494,6 @@ help:
     @echo    Or run NMake directly from a Visual Studio "x64 Native Tools" prompt:
     @echo      nmake /f Makefile.nmake
     @echo      nmake /f Makefile.nmake run-telnet
+    @echo      nmake /f Makefile.nmake BUILD_EXAMPLE_TCP=1 PORT=9999 run-tcp
     @echo      nmake /f Makefile.nmake clean-all
     @echo.

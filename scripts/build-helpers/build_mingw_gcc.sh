@@ -22,11 +22,13 @@
 #    ./scripts/build-helpers/build_mingw_gcc.sh run-serial            Build + run serial demo
 #    ./scripts/build-helpers/build_mingw_gcc.sh clean                  Remove host-platform artefacts
 #    ./scripts/build-helpers/build_mingw_gcc.sh clean-all              Remove entire build/ tree
+#    ./scripts/build-helpers/build_mingw_gcc.sh clean all              Several targets run in order
 #    ./scripts/build-helpers/build_mingw_gcc.sh help                  Show this message
 #
 #  Environment variables
 #    CC=gcc                   Host compiler  (default: gcc)
 #    CC=arm-none-eabi-gcc       Cross-compiler for 'embedded'
+#    TARGET_FLAGS="-mcpu=..."   CPU flags of the MCU (required for 'embedded')
 #    PORT=2323                Telnet port for run-telnet
 #    BUILD_EXAMPLE_TELNET=0|1     Enable Telnet transport / telnet demo (default: 1)
 #    BUILD_EXAMPLE_TCP=0|1        Enable TCP transport / tcp demo (default: 0)
@@ -123,8 +125,6 @@ if [ ${#TARGETS[@]} -eq 0 ]; then
     TARGETS=(all)
 fi
 
-TARGETS_STR="${TARGETS[*]}"
-
 # ---------------------------------------------------------------------------
 #  Helper: resolve the platform output directory
 # ---------------------------------------------------------------------------
@@ -138,93 +138,107 @@ outdir() {
 }
 
 # ---------------------------------------------------------------------------
-#  Dispatch
+#  Help
 # ---------------------------------------------------------------------------
-case "$TARGETS_STR" in
+show_help() {
+    echo ""
+    echo -e "${BLD}OpenLibCLI Library — GCC build wrapper${RST}"
+    echo "============================================"
+    echo ""
+    echo "Usage: ./scripts/build-helpers/build_mingw_gcc.sh [target ...] [port]"
+    echo ""
+    echo "Output directories:"
+    echo "  build/gcc/linux/     Linux host builds"
+    echo "  build/gcc/macos/     macOS host builds"
+    echo "  build/gcc/embedded-baremetal/  Bare-metal cross-compile"
+    echo ""
+    echo "Targets (several run one after the other, e.g. 'clean all'):"
+    echo "  (none)           Shared library + telnet + serial examples  [default; BUILD_LIB_STATIC=1 adds the static library]"
+    echo "  lib              Static library only"
+    echo "  shared           Shared library only"
+    echo "  telnet           Telnet server example"
+    echo "  tcp              TCP server example"
+    echo "  uart             Serial server example (stdin simulation)"
+    echo "  asan             Build everything with AddressSanitizer"
+    echo "  embedded         Cross-compile -> build/gcc/embedded-baremetal/libs/libopenlibcli.a"
+    echo "  run-telnet [P]   Build + run telnet server on port P"
+    echo "  run-tcp [P]      Build + run TCP server on port P"
+    echo "  run-serial       Build + run serial demo"
+    echo "  run-pipe         Build + run pipe demo"
+    echo "  run-unix-socket  Build + run UNIX socket demo (POSIX only)"
+    echo "  clean            Remove host-platform artefacts"
+    echo "  clean-all        Remove entire build/ tree"
+    echo "  help             Show this message"
+    echo ""
+    echo "Environment:"
+    echo "  CC=gcc                    Host compiler (default: gcc)"
+    echo "  CC=arm-none-eabi-gcc         Cross-compiler for 'embedded'"
+    echo "  TARGET_FLAGS=\"-mcpu=...\"    CPU flags of the MCU (required for 'embedded')"
+    echo "  PORT=2323                 Telnet port (default: 2323)"
+    echo "  BUILD_ASAN=0|1               Build with AddressSanitizer (default: 0)"
+    echo "  BUILD_EXAMPLE_TELNET=0|1      Enable Telnet transport / telnet demo"
+    echo "  BUILD_EXAMPLE_TCP=0|1         Enable TCP transport / tcp demo (default: 0)"
+    echo "  BUILD_EXAMPLE_SERIAL=0|1      Enable generic serial transport / demo (default: 1)"
+    echo "  BUILD_EXAMPLE_PIPE=0|1        Enable pipe transport / demo (default: 0)"
+    echo "  BUILD_EXAMPLE_UNIX_SOCKET=0|1 Enable UNIX socket transport / demo (default: 0)"
+    echo ""
+    echo "Examples:"
+    echo "  ./scripts/build-helpers/build_mingw_gcc.sh"
+    echo "  ./scripts/build-helpers/build_mingw_gcc.sh clean all"
+    echo "  BUILD_ASAN=1 ./scripts/build-helpers/build_mingw_gcc.sh"
+    echo "  BUILD_EXAMPLE_TCP=1 ./scripts/build-helpers/build_mingw_gcc.sh"
+    echo "  BUILD_ASAN=1 BUILD_EXAMPLE_SERIAL=1 ./scripts/build-helpers/build_mingw_gcc.sh run-serial"
+    echo "  ./scripts/build-helpers/build_mingw_gcc.sh run-telnet 9999"
+    echo "  CC=clang ./scripts/build-helpers/build_mingw_gcc.sh"
+    echo "  CC=arm-none-eabi-gcc TARGET_FLAGS=\"-mcpu=cortex-m4 -mthumb\" ./scripts/build-helpers/build_mingw_gcc.sh embedded"
+    echo "  ./scripts/build-helpers/build_mingw_gcc.sh clean-all"
+    echo ""
+}
 
-    help)
-        echo ""
-        echo -e "${BLD}OpenLibCLI Library — GCC build wrapper${RST}"
-        echo "============================================"
-        echo ""
-        echo "Usage: ./scripts/build-helpers/build_mingw_gcc.sh [target] [port]"
-        echo ""
-        echo "Output directories:"
-        echo "  build/gcc/linux/     Linux host builds"
-        echo "  build/gcc/macos/     macOS host builds"
-        echo "  build/gcc/embedded-baremetal/  Bare-metal cross-compile"
-        echo ""
-        echo "Targets:"
-        echo "  (none)           Shared library + telnet + serial examples  [default; BUILD_LIB_STATIC=1 adds the static library]"
-        echo "  lib              Static library only"
-        echo "  shared           Shared library only"
-        echo "  telnet           Telnet server example"
-        echo "  tcp              TCP server example"
-        echo "  uart             Serial server example (stdin simulation)"
-        echo "  asan             Build everything with AddressSanitizer"
-        echo "  embedded         Cross-compile -> build/gcc/embedded-baremetal/libs/libopenlibcli.a"
-        echo "  run-telnet [P]   Build + run telnet server on port P"
-        echo "  run-tcp [P]      Build + run TCP server on port P"
-        echo "  run-serial       Build + run serial demo"
-        echo "  run-pipe         Build + run pipe demo"
-        echo "  run-unix-socket  Build + run UNIX socket demo (POSIX only)"
-        echo "  clean            Remove host-platform artefacts"
-        echo "  clean-all        Remove entire build/ tree"
-        echo "  help             Show this message"
-        echo ""
-        echo "Environment:"
-        echo "  CC=gcc                    Host compiler (default: gcc)"
-        echo "  CC=arm-none-eabi-gcc         Cross-compiler for 'embedded'"
-        echo "  PORT=2323                 Telnet port (default: 2323)"
-        echo "  BUILD_ASAN=0|1               Build with AddressSanitizer (default: 0)"
-        echo "  BUILD_EXAMPLE_TELNET=0|1      Enable Telnet transport / telnet demo"
-        echo "  BUILD_EXAMPLE_TCP=0|1         Enable TCP transport / tcp demo (default: 0)"
-        echo "  BUILD_EXAMPLE_SERIAL=0|1      Enable generic serial transport / demo (default: 1)"
-        echo "  BUILD_EXAMPLE_PIPE=0|1        Enable pipe transport / demo (default: 0)"
-        echo "  BUILD_EXAMPLE_UNIX_SOCKET=0|1 Enable UNIX socket transport / demo (default: 0)"
-        echo ""
-        echo "Examples:"
-        echo "  ./scripts/build-helpers/build_mingw_gcc.sh"
-        echo "  BUILD_ASAN=1 ./scripts/build-helpers/build_mingw_gcc.sh"
-        echo "  BUILD_EXAMPLE_TCP=1 ./scripts/build-helpers/build_mingw_gcc.sh"
-        echo "  BUILD_ASAN=1 BUILD_EXAMPLE_SERIAL=1 ./scripts/build-helpers/build_mingw_gcc.sh run-serial"
-        echo "  ./scripts/build-helpers/build_mingw_gcc.sh run-telnet 9999"
-        echo "  CC=clang ./scripts/build-helpers/build_mingw_gcc.sh"
-        echo "  CC=arm-none-eabi-gcc ./scripts/build-helpers/build_mingw_gcc.sh embedded"
-        echo "  ./scripts/build-helpers/build_mingw_gcc.sh clean-all"
-        echo ""
+for TARGET in "${TARGETS[@]}"; do
+    if [ "$TARGET" = "help" ]; then
+        show_help
         exit 0
-        ;;
+    fi
+done
 
-    embedded)
-        info "Cross-compiling for embedded target ..."
-        info "CC        : ${CC:-gcc}"
-        info "Output    : build/gcc/embedded-baremetal/"
-        echo ""
-        "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="embedded-baremetal" \
-                    ${BUILD_VARS[@]+"${BUILD_VARS[@]}"} embedded-baremetal
-        ok "Embedded library: build/gcc/embedded-baremetal/libs/libopenlibcli.a"
-        ;;
+# ---------------------------------------------------------------------------
+#  Dispatch: each target is a make run of its own, in the order given, so
+#  'clean all' cleans before it builds and 'embedded' keeps its own PLATFORM
+# ---------------------------------------------------------------------------
+for TARGET in "${TARGETS[@]}"; do
+    case "$TARGET" in
 
-    clean|clean-all|distclean|lib|shared|all|asan|cli_server_telnet|cli_server_tcp|telnet|tcp|cli_server_serial|uart|run-telnet|run-tcp|run-serial|run-pipe|run-unix-socket)
-        OUT="$(outdir)"
-        info "Platform  : ${PLATFORM}   ->  ${OUT}/"
-        info "Compiler  : ${CC:-gcc}"
-        info "Make      : ${MAKE_CMD}"
-        info "Target    : ${TARGETS_STR}"
-        if [ "${BUILD_ASAN:-0}" = "1" ]; then
-            info "ASAN      : active"
-        fi
-        echo ""
-        "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="$PLATFORM" PORT="$PORT" \
-                    ${BUILD_VARS[@]+"${BUILD_VARS[@]}"} ${TARGETS_STR}
-        ok "Done."
-        ;;
+        embedded)
+            info "Cross-compiling for embedded target ..."
+            info "CC        : ${CC:-gcc}"
+            info "Output    : build/gcc/embedded-baremetal/"
+            echo ""
+            "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="embedded-baremetal" \
+                        ${BUILD_VARS[@]+"${BUILD_VARS[@]}"} embedded-baremetal
+            ok "Embedded library: build/gcc/embedded-baremetal/libs/libopenlibcli.a"
+            ;;
 
-    *)
-        warn "Unknown target '${TARGETS_STR}' — passing to ${MAKE_CMD} ..."
-        "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="$PLATFORM" PORT="$PORT" \
-                    ${BUILD_VARS[@]+"${BUILD_VARS[@]}"} ${TARGETS_STR}
-        ;;
+        clean|clean-all|clean-asan|distclean|lib|shared|all|asan|cli_server_telnet|cli_server_tcp|telnet|tcp|cli_server_serial|uart|cli_server_pipe|pipe|cli_server_unix_socket|unix-socket|run-telnet|run-tcp|run-serial|run-pipe|run-unix-socket)
+            OUT="$(outdir)"
+            info "Platform  : ${PLATFORM}   ->  ${OUT}/"
+            info "Compiler  : ${CC:-gcc}"
+            info "Make      : ${MAKE_CMD}"
+            info "Target    : ${TARGET}"
+            if [ "${BUILD_ASAN:-0}" = "1" ]; then
+                info "ASAN      : active"
+            fi
+            echo ""
+            "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="$PLATFORM" PORT="$PORT" \
+                        ${BUILD_VARS[@]+"${BUILD_VARS[@]}"} "$TARGET"
+            ok "Done."
+            ;;
 
-esac
+        *)
+            warn "Unknown target '${TARGET}' — passing to ${MAKE_CMD} ..."
+            "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="$PLATFORM" PORT="$PORT" \
+                        ${BUILD_VARS[@]+"${BUILD_VARS[@]}"} "$TARGET"
+            ;;
+
+    esac
+done

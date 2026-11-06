@@ -1,3 +1,34 @@
+<#
+.SYNOPSIS
+    RAM and flash use of OpenLibCLI on an AVR MCU (Arduino Uno class by default).
+
+.DESCRIPTION
+    Compiles the library with the AVR profile of config/cli_embedded_config.h, links it
+    into a minimal serial firmware (cli_serial.c + the shared demo commands + a stub
+    transport) with --gc-sections, and prints:
+      - the size of cli_struct_t, cli_cmd_struct_t and the command pool (avr_size_probe.c);
+      - static RAM (.data + .bss) and flash (.text + .data) of the linked firmware, as a
+        share of the MCU's SRAM and flash;
+      - the largest RAM and flash symbols.
+    Needs the avr-gcc of the Arduino AVR core (Arduino IDE / arduino-cli), found under
+    %LOCALAPPDATA%\Arduino15\packages. Objects and the .elf go to build\ in the repository.
+
+.PARAMETER Mcu
+    -mmcu value (default atmega328p).
+.PARAMETER ArduinoVersion
+    Value of the ARDUINO macro (default 10819).
+.PARAMETER SramBytes
+    SRAM of the MCU, for the percentages (default 2048).
+.PARAMETER FlashBytes
+    Flash of the MCU, for the percentages (default 32768).
+.PARAMETER TopAll
+    List every RAM and flash symbol instead of the largest 20.
+
+.EXAMPLE
+    ./scripts/diagnostics/avr_mem_stats.ps1
+.EXAMPLE
+    ./scripts/diagnostics/avr_mem_stats.ps1 -Mcu atmega2560 -SramBytes 8192 -FlashBytes 262144
+#>
 param(
     [string]$Mcu = "atmega328p",
     [int]$ArduinoVersion = 10819,
@@ -249,10 +280,10 @@ $topRam | Select-Object Name, Type, @{Name = "Bytes"; Expression = { $_.Size }} 
 Write-Host ("  Listed total: {0} bytes ({1}% of {2})" -f $topRamTotal, $topRamPercent, $SramBytes)
 Write-Host ("  Other: {0} bytes" -f $ramOther)
 Write-Host ""
-Write-Host "Static RAM in linked examples/cli_serial_app.elf (gc-sections):" -ForegroundColor Cyan
+Write-Host "Static RAM in linked $(Split-Path -Leaf $serialElfPath) (gc-sections):" -ForegroundColor Cyan
 Write-Host ("  Total: {0} bytes ({1}% of {2})" -f $ramTotal, $ramPercent, $SramBytes)
 Write-Host ""
-Write-Host "Flash (ROM) in linked examples/cli_serial_app.elf (gc-sections):" -ForegroundColor Cyan
+Write-Host "Flash (ROM) in linked $(Split-Path -Leaf $serialElfPath) (gc-sections):" -ForegroundColor Cyan
 Write-Host ("  Total: {0} bytes ({1}% of {2})" -f $romTotal, $romPercent, $FlashBytes)
 Write-Host ""
 
@@ -265,7 +296,3 @@ Write-Host "Top flash symbols:" -ForegroundColor Cyan
 $topFlash | Select-Object Name, @{Name = "Bytes"; Expression = { $_.Size }}, @{Name = "%"; Expression = { "{0:F1}" -f (100.0 * $_.Size / $romTotal) }} | Format-Table -AutoSize
 Write-Host ("  Listed total: {0} bytes ({1}% of {2})" -f $topFlashTotal, [math]::Round((100.0 * $topFlashTotal) / $romTotal, 1), $romTotal)
 Write-Host ("  Other: {0} bytes" -f $flashOther)
-
-# ./scripts/diagnostics/avr_mem_stats.ps1
-# ./scripts/diagnostics/avr_mem_stats.ps1 -Mcu atmega328p -SramBytes 2048
-# ./scripts/diagnostics/avr_mem_stats.ps1 -TopAll                    # list all flash + RAM symbols

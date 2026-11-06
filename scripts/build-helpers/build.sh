@@ -9,9 +9,10 @@
 #    ./build.sh mingw [args...]     Alias for gcc
 #    ./build.sh cmake [args...]     CMake             (build_cmake.sh)
 #    ./build.sh meson [args...]     Meson             (build_meson.sh)
-#    ./build.sh all [args...]       All available toolchains
+#    ./build.sh all [BUILD_EXAMPLE_*=0|1 ...]  All available toolchains
 #
-#  All remaining arguments are passed through to the sub-script.
+#  All remaining arguments are passed through to the sub-script ('all' takes only the
+#  BUILD_EXAMPLE_* settings, the arguments every toolchain understands).
 # =============================================================================
 
 set -euo pipefail
@@ -22,7 +23,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #  Colour helpers
 # ---------------------------------------------------------------------------
 if [ -t 1 ]; then
-    CYN='\033[0;36m'; GRN='\033[0;32m'; RED='\033[0;31m'; YLW='\033[1;33m'; BLD='\033[1m'; RST='\033[0m'
+    # The escape characters themselves ($'...'), so the help text (a heredoc) shows them as
+    # colours too, not only echo -e.
+    CYN=$'\033[0;36m'; GRN=$'\033[0;32m'; RED=$'\033[0;31m'; YLW=$'\033[1;33m'; BLD=$'\033[1m'; RST=$'\033[0m'
 else
     CYN=''; GRN=''; RED=''; YLW=''; BLD=''; RST=''
 fi
@@ -65,6 +68,19 @@ auto_detect() {
 }
 
 dispatch_all() {
+    # Every toolchain gets the same arguments, so only the settings all of them read the
+    # same way are taken: a make target would be a CMake error and Meson's build directory.
+    local a
+    for a in ${REST[@]+"${REST[@]}"}; do
+        case "$a" in
+            BUILD_EXAMPLE_TELNET=[01]|BUILD_EXAMPLE_TCP=[01]|BUILD_EXAMPLE_SERIAL=[01]|\
+            BUILD_EXAMPLE_PIPE=[01]|BUILD_EXAMPLE_UNIX_SOCKET=[01]) ;;
+            *) die "'all' takes only BUILD_EXAMPLE_*=0|1 settings, which every toolchain" \
+                   "understands. '$a' is for one toolchain: run that one with it" \
+                   "(e.g. build.sh gcc $a)." ;;
+        esac
+    done
+
     info "Running all available toolchains..."
 
     if command -v gcc &>/dev/null; then
@@ -104,9 +120,11 @@ Usage:
   scripts/build-helpers/build.sh gcc [args...]    GCC + GNU Make
   scripts/build-helpers/build.sh cmake [args...]  CMake
   scripts/build-helpers/build.sh meson [args...]  Meson
-  scripts/build-helpers/build.sh all [args...]    All available
+  scripts/build-helpers/build.sh all [BUILD_EXAMPLE_*=0|1 ...]
+                                                  All available
 
-Arguments after the toolchain name are passed through.
+Arguments after the toolchain name are passed through. 'all' takes only the
+BUILD_EXAMPLE_* settings, the arguments every toolchain understands.
 Run the sub-script directly for per-toolchain help:
   build_mingw_gcc.sh help
   build_cmake.sh help
@@ -122,29 +140,19 @@ HELP
 }
 
 # ---------------------------------------------------------------------------
-#  Parse: toolchain name (if first arg matches) + build REST from remaining
+#  Parse: an optional toolchain name as the FIRST argument (as in build.bat); every
+#  other argument, wherever it is, is passed on unchanged.
 # ---------------------------------------------------------------------------
-TOOLCHAIN=""
-REST=()
+TOOLCHAIN="auto"
+REST=("$@")
 
-for arg in "$@"; do
-    if [ -z "$TOOLCHAIN" ]; then
-        case "$arg" in
-            help|--help|-h) show_help; exit 0 ;;
-            gcc|cmake|meson|all)
-                TOOLCHAIN="$arg"
-                continue
-                ;;
-            mingw)
-                TOOLCHAIN="gcc"
-                continue
-                ;;
-        esac
-    fi
-    REST+=("$arg")
-done
-
-: "${TOOLCHAIN:=auto}"
+if [ $# -gt 0 ]; then
+    case "$1" in
+        help|--help|-h) show_help ;;
+        gcc|cmake|meson|all) TOOLCHAIN="$1"; REST=("${@:2}") ;;
+        mingw)               TOOLCHAIN="gcc"; REST=("${@:2}") ;;
+    esac
+fi
 
 # ---------------------------------------------------------------------------
 #  Dispatch

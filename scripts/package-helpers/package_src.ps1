@@ -1,7 +1,10 @@
 #!/usr/bin/env pwsh
 # package_src.ps1 — Create the source-drop package (copy-paste install)
 # Package name: OpenLibCLI-<version>-src
-# Output: install/OpenLibCLI-<version>-src/{cli.c, cli.h, LICENSE, README.md, version}
+# Output: install/OpenLibCLI-<version>-src/{cli/ (the library source tree), LICENSE, README.md, version}
+
+# Any failed step (e.g. a Copy-Item) must end the script with an error, not be skipped.
+$ErrorActionPreference = 'Stop'
 
 pushd $PSScriptRoot/../..
 
@@ -14,8 +17,8 @@ try {
 
     # Copy the entire cli directory recursively (including subfolders like 'config')
     Copy-Item -Path "cli" -Destination "$INSTALL_DIR" -Recurse -Force
-    
-    Copy-Item LICENSE           $INSTALL_DIR -ErrorAction SilentlyContinue
+
+    Copy-Item LICENSE           $INSTALL_DIR
     Copy-Item README.md         $INSTALL_DIR
     Copy-Item version           $INSTALL_DIR
 

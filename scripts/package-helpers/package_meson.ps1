@@ -9,6 +9,9 @@
 #     examples/                      <- serial + telnet examples
 #     LICENSE, README.md, version
 
+# Any failed step (e.g. a Copy-Item) must end the script with an error, not be skipped.
+$ErrorActionPreference = 'Stop'
+
 pushd $PSScriptRoot/../..
 
 try {

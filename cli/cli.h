@@ -926,7 +926,9 @@ struct cli_s {
  * command tree. Does nothing if @p cli or @p transport is @c NULL.
  *
  * @param[out] cli         Zeroed and initialised session.
- * @param[in]  hostname    Initial hostname string shown in the prompt (@c NULL = "cli").
+ * @param[in]  hostname    Initial hostname string shown in the prompt (@c NULL = "cli"; a
+ *                         name that does not fit in @c CLI_MAX_PROMPT_LEN is not used and
+ *                         "cli" is shown: @c cli_set_hostname() reports that case).
  * @param[in]  transport   Pointer to a filled @c cli_transport_struct_t; contents are
  *                         copied.
  * @param[in]  platform    Optional platform services; pass @c NULL for host OS
@@ -1009,17 +1011,27 @@ OPENLIBCLI_API void cli_set_ansi_supported(cli_struct_t *cli, bool enabled);
  * @brief Set the session hostname string (appears in the prompt).
  *
  * @param[in] cli       Active CLI session.
- * @param[in] hostname  New hostname string (@c NULL clears it).
+ * @param[in] hostname  New hostname string (@c NULL clears it), shorter than
+ *                      @c CLI_MAX_PROMPT_LEN.
+ *
+ * @return @c CLI_OK, or @c CLI_ERR if @p cli is @c NULL or @p hostname does not fit in
+ *         @c CLI_MAX_PROMPT_LEN (the previous hostname is kept; a cut name would show
+ *         another name in the prompt).
  */
-OPENLIBCLI_API void cli_set_hostname(cli_struct_t *cli, const char *hostname);
+OPENLIBCLI_API int8_t cli_set_hostname(cli_struct_t *cli, const char *hostname);
 
 /**
  * @brief Set the MOTD banner text.
  *
  * @param[in] cli     Active CLI session.
- * @param[in] banner  Banner string to emit at session start (@c NULL clears it).
+ * @param[in] banner  Banner string to emit at session start (@c NULL clears it), shorter
+ *                    than @c CLI_MAX_BANNER_LEN.
+ *
+ * @return @c CLI_OK, or @c CLI_ERR if @p cli is @c NULL, @p banner does not fit in
+ *         @c CLI_MAX_BANNER_LEN (the previous banner is kept; a cut banner would end in
+ *         the middle of a line) or @c CLI_ENABLE_BANNER is 0.
  */
-OPENLIBCLI_API void cli_set_banner(cli_struct_t *cli, const char *banner);
+OPENLIBCLI_API int8_t cli_set_banner(cli_struct_t *cli, const char *banner);
 
 /**
  * @brief Set the enable-mode secret (privileged exec password).

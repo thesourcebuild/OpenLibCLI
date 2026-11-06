@@ -1,17 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
 project(OpenLibCLI C)
 
-# Link-time optimisation for the shared library and the programs built here (see the end
-# of this file). Not for the static library: it is installed for other builds, and its
-# objects would hold compiler-specific LTO bytecode that another compiler, compiler version
-# or linker cannot link. A CMAKE_INTERPROCEDURAL_OPTIMIZATION given by the user applies to
-# every target as usual.
-include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
-if(NOT ipo_supported)
-    message(STATUS "LTO not supported: ${ipo_error}")
-endif()
-
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 # Before include(CTest), which would otherwise define BUILD_TESTING as ON first.
@@ -94,6 +83,16 @@ option(BUILD_ASAN "Build with AddressSanitizer" OFF)
 # =========================================================================
 option(BUILD_LIB_STATIC "Build the static library (default: shared only)" OFF)
 
+# A shared library needs a dynamic loader: a bare-metal toolchain (CMAKE_SYSTEM_NAME Generic)
+# has none, and CMake would build cli_shared as a second static archive of the same name.
+# There the static library is the library.
+get_property(CLI_HAS_SHARED GLOBAL PROPERTY TARGET_SUPPORTS_SHARED_LIBS)
+if(BUILD_LIB_STATIC OR NOT CLI_HAS_SHARED)
+    set(CLI_BUILD_STATIC ON)
+else()
+    set(CLI_BUILD_STATIC OFF)
+endif()
+
 # =========================================================================
 #  Compiler warnings
 # =========================================================================
@@ -135,11 +134,11 @@ set(CLI_SOURCES
 )
 
 # =========================================================================
-#  Static library  (opt-in via BUILD_LIB_STATIC)
+#  Static library  (opt-in via BUILD_LIB_STATIC; the only library without shared support)
 # =========================================================================
-if(BUILD_LIB_STATIC)
+if(CLI_BUILD_STATIC)
     add_library(cli_static STATIC ${CLI_SOURCES})
-    target_include_directories(cli_static PUBLIC 
+    target_include_directories(cli_static PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/cli>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/OpenLibCLI>
     )
@@ -149,31 +148,41 @@ if(BUILD_LIB_STATIC)
     else()
         set_target_properties(cli_static PROPERTIES OUTPUT_NAME OpenLibCLI)
     endif()
-    # Installed as OpenLibCLI::OpenLibCLI_static
-    set_target_properties(cli_static PROPERTIES EXPORT_NAME OpenLibCLI_static)
+    # Installed as OpenLibCLI::OpenLibCLI_static, or as OpenLibCLI::OpenLibCLI when it is the
+    # only library.
+    if(CLI_HAS_SHARED)
+        set_target_properties(cli_static PROPERTIES EXPORT_NAME OpenLibCLI_static)
+    else()
+        set_target_properties(cli_static PROPERTIES EXPORT_NAME OpenLibCLI)
+    endif()
     if(TARGET gen_version)
         add_dependencies(cli_static gen_version)
     endif()
 endif()
 
 # =========================================================================
-#  Shared library
+#  Shared library  (where the platform supports one)
 # =========================================================================
-add_library(cli_shared SHARED ${CLI_SOURCES})
-target_include_directories(cli_shared PUBLIC 
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/cli>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/OpenLibCLI>
-)
-target_link_libraries(cli_shared PUBLIC ${PLATFORM_LIBS})
-target_compile_definitions(cli_shared PRIVATE CLI_SHARED BUILD_LIB_SHARED PUBLIC CLI_SHARED)
-# Installed as OpenLibCLI::OpenLibCLI
-set_target_properties(cli_shared PROPERTIES OUTPUT_NAME OpenLibCLI EXPORT_NAME OpenLibCLI)
-# The shared library's path as built (its name differs per toolchain, its directory per
-# configuration), for build scripts that copy it: they never have to guess the file name.
-file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/openlibcli_shared_$<CONFIG>.txt"
-     CONTENT "$<TARGET_FILE:cli_shared>")
-if(TARGET gen_version)
-    add_dependencies(cli_shared gen_version)
+if(CLI_HAS_SHARED)
+    add_library(cli_shared SHARED ${CLI_SOURCES})
+    target_include_directories(cli_shared PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/cli>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/OpenLibCLI>
+    )
+    target_link_libraries(cli_shared PUBLIC ${PLATFORM_LIBS})
+    target_compile_definitions(cli_shared PRIVATE CLI_SHARED BUILD_LIB_SHARED PUBLIC CLI_SHARED)
+    # Installed as OpenLibCLI::OpenLibCLI
+    set_target_properties(cli_shared PROPERTIES OUTPUT_NAME OpenLibCLI EXPORT_NAME OpenLibCLI)
+    # The shared library's path as built (its name differs per toolchain, its directory per
+    # configuration), for build scripts that copy it: they never have to guess the file name.
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/openlibcli_shared_$<CONFIG>.txt"
+         CONTENT "$<TARGET_FILE:cli_shared>")
+    if(TARGET gen_version)
+        add_dependencies(cli_shared gen_version)
+    endif()
+    set(CLI_LIB_TARGET cli_shared)
+else()
+    set(CLI_LIB_TARGET cli_static)
 endif()
 
 # =========================================================================
@@ -212,7 +221,7 @@ if(NOT CMAKE_CROSSCOMPILING)
             examples/win_linux/telnet/cli_server_telnet.c
             examples/win_linux/telnet/cli_transport_telnet.c
             ${DEMO_SHARED})
-        target_link_libraries(cli_server_telnet PRIVATE cli_shared)
+        target_link_libraries(cli_server_telnet PRIVATE ${CLI_LIB_TARGET})
         if(TARGET cli_server_telnet)
             target_link_options(cli_server_telnet PRIVATE
                 "$<$<C_COMPILER_ID:MSVC>:/MAP:${CLI_OUT_DIR}/cli_server_telnet.map>"
@@ -227,7 +236,7 @@ if(NOT CMAKE_CROSSCOMPILING)
             examples/win_linux/tcp/cli_server_tcp.c
             examples/win_linux/tcp/cli_transport_tcp.c
             ${DEMO_SHARED})
-        target_link_libraries(cli_server_tcp PRIVATE cli_shared)
+        target_link_libraries(cli_server_tcp PRIVATE ${CLI_LIB_TARGET})
         if(TARGET cli_server_tcp)
             target_link_options(cli_server_tcp PRIVATE
                 "$<$<C_COMPILER_ID:MSVC>:/MAP:${CLI_OUT_DIR}/cli_server_tcp.map>"
@@ -242,7 +251,7 @@ if(NOT CMAKE_CROSSCOMPILING)
             examples/win_linux/serial/cli_server_serial.c
             examples/win_linux/serial/cli_transport_serial.c
             ${DEMO_SHARED})
-        target_link_libraries(cli_server_serial PRIVATE cli_shared)
+        target_link_libraries(cli_server_serial PRIVATE ${CLI_LIB_TARGET})
         if(TARGET cli_server_serial)
             target_link_options(cli_server_serial PRIVATE
                 "$<$<C_COMPILER_ID:MSVC>:/MAP:${CLI_OUT_DIR}/cli_server_serial.map>"
@@ -256,7 +265,7 @@ if(NOT CMAKE_CROSSCOMPILING)
             examples/win_linux/pipe/cli_server_pipe.c
             examples/win_linux/pipe/cli_transport_pipe.c
             ${DEMO_SHARED})
-        target_link_libraries(cli_server_pipe PRIVATE cli_shared)
+        target_link_libraries(cli_server_pipe PRIVATE ${CLI_LIB_TARGET})
         if(WIN32)
             target_link_libraries(cli_server_pipe PRIVATE advapi32)
         else()
@@ -275,7 +284,7 @@ if(NOT CMAKE_CROSSCOMPILING)
             examples/linux/unix_socket/cli_server_unix_socket.c
             examples/linux/unix_socket/cli_transport_unix_socket.c
             ${DEMO_SHARED})
-        target_link_libraries(cli_server_unix_socket PRIVATE cli_shared Threads::Threads)
+        target_link_libraries(cli_server_unix_socket PRIVATE ${CLI_LIB_TARGET} Threads::Threads)
         if(TARGET cli_server_unix_socket)
             target_link_options(cli_server_unix_socket PRIVATE
                 "$<$<C_COMPILER_ID:MSVC>:/MAP:${CLI_OUT_DIR}/cli_server_unix_socket.map>"
@@ -287,15 +296,30 @@ if(NOT CMAKE_CROSSCOMPILING)
 endif()
 
 # =========================================================================
-#  Link-time optimisation (see the top of this file)
+#  Link-time optimisation for the shared library and the programs built here. Not for the
+#  static library: it is installed for other builds, and its objects would hold
+#  compiler-specific LTO bytecode that another compiler, compiler version or linker cannot
+#  link. A CMAKE_INTERPROCEDURAL_OPTIMIZATION given by the user applies to every target as
+#  usual. The check links a test program, so it runs only when there is a target to use it
+#  (none in a bare-metal build, which has only the static library).
 # =========================================================================
-if(ipo_supported AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+    set(CLI_LTO_TARGETS)
     foreach(_t cli_shared test_cli_args_parse test_cli_engine cli_server_telnet cli_server_tcp
                cli_server_serial cli_server_pipe cli_server_unix_socket)
         if(TARGET ${_t})
-            set_property(TARGET ${_t} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+            list(APPEND CLI_LTO_TARGETS ${_t})
         endif()
     endforeach()
+    if(CLI_LTO_TARGETS)
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
+        if(ipo_supported)
+            set_property(TARGET ${CLI_LTO_TARGETS} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+        else()
+            message(STATUS "LTO not supported: ${ipo_error}")
+        endif()
+    endif()
 endif()
 
 # =========================================================================
@@ -308,8 +332,11 @@ file(READ "${CMAKE_SOURCE_DIR}/version" _RAW_VERSION)
 string(STRIP "${_RAW_VERSION}" PROJECT_VERSION)
 
 # --- Targets ---
-set(_INSTALL_TARGETS cli_shared)
-if(BUILD_LIB_STATIC)
+set(_INSTALL_TARGETS)
+if(CLI_HAS_SHARED)
+    list(APPEND _INSTALL_TARGETS cli_shared)
+endif()
+if(CLI_BUILD_STATIC)
     list(APPEND _INSTALL_TARGETS cli_static)
 endif()
 install(TARGETS ${_INSTALL_TARGETS}
@@ -357,7 +384,9 @@ message(STATUS "C compiler   : ${CMAKE_C_COMPILER}")
 message(STATUS "C standard   : C${CMAKE_C_STANDARD}")
 message(STATUS "Platform libs: ${PLATFORM_LIBS}")
 message(STATUS "Cross-compile: ${CMAKE_CROSSCOMPILING}")
-if(BUILD_LIB_STATIC)
+if(NOT CLI_HAS_SHARED)
+    message(STATUS "Library type : static only (no shared libraries on this platform)")
+elseif(CLI_BUILD_STATIC)
     message(STATUS "Library type : static + shared")
 else()
     message(STATUS "Library type : shared only")
@@ -371,16 +400,18 @@ message(STATUS "  Unix socket : ${BUILD_EXAMPLE_UNIX_SOCKET}")
 message(STATUS "")
 message(STATUS "Targets:")
 # File names as the targets above produce them (OUTPUT_NAME and the platform's affixes).
-if(BUILD_LIB_STATIC)
+if(CLI_BUILD_STATIC)
     get_target_property(_static_name cli_static OUTPUT_NAME)
     message(STATUS "  cli_static         -> ${CLI_LIB_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}${_static_name}${CMAKE_STATIC_LIBRARY_SUFFIX}")
 endif()
-set(_shared_file "${CMAKE_SHARED_LIBRARY_PREFIX}OpenLibCLI${CMAKE_SHARED_LIBRARY_SUFFIX}")
-if(WIN32)
-    # The DLL is a runtime file (next to the examples); the import library is an archive.
-    message(STATUS "  cli_shared         -> ${CLI_BIN_DIR}/${_shared_file} (+ ${CLI_LIB_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}OpenLibCLI${CMAKE_IMPORT_LIBRARY_SUFFIX})")
-else()
-    message(STATUS "  cli_shared         -> ${CLI_LIB_DIR}/${_shared_file}")
+if(CLI_HAS_SHARED)
+    set(_shared_file "${CMAKE_SHARED_LIBRARY_PREFIX}OpenLibCLI${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    if(WIN32)
+        # The DLL is a runtime file (next to the examples); the import library is an archive.
+        message(STATUS "  cli_shared         -> ${CLI_BIN_DIR}/${_shared_file} (+ ${CLI_LIB_DIR}/${CMAKE_IMPORT_LIBRARY_PREFIX}OpenLibCLI${CMAKE_IMPORT_LIBRARY_SUFFIX})")
+    else()
+        message(STATUS "  cli_shared         -> ${CLI_LIB_DIR}/${_shared_file}")
+    endif()
 endif()
 if(NOT CMAKE_CROSSCOMPILING)
 if(BUILD_EXAMPLE_TELNET)
@@ -400,7 +431,8 @@ message(STATUS "  cli_server_unix_socket -> ${CLI_BIN_DIR}/cli_server_unix_socke
 endif()
 endif()
 message(STATUS "")
-message(STATUS "Cross-compile example (ARM bare-metal):")
-message(STATUS "  cmake -B build/cmake -DCMAKE_TOOLCHAIN_FILE=arm-none-eabi.cmake")
+message(STATUS "Cross-compile (ARM bare-metal), with a toolchain file of your own that sets")
+message(STATUS "CMAKE_SYSTEM_NAME Generic, the cross-compiler and the MCU's CPU flags:")
+message(STATUS "  cmake -B build/cmake -DCMAKE_TOOLCHAIN_FILE=<your-toolchain-file>.cmake")
 message(STATUS "  cmake --build build/cmake")
 message(STATUS "  -> output: build/cmake/embedded-baremetal/libs/libOpenLibCLI.a")

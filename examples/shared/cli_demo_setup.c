@@ -213,10 +213,9 @@ int8_t cmd_hostname(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const c
 
   if (argc != 2) {
     cli_println(cli, "Usage: hostname <name>");
-  } else if (strlen(argv[1]) >= (size_t)CLI_MAX_PROMPT_LEN) {
+  } else if (cli_set_hostname(cli, argv[1]) != CLI_OK) {
     cli_error(cli, "Hostname too long (at most %d characters).", CLI_MAX_PROMPT_LEN - 1);
   } else {
-    cli_set_hostname(cli, argv[1]);
     cli_println(cli, "Hostname set to: %s", argv[1]);
     rc = CLI_OK;
   }
