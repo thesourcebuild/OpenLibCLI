@@ -202,6 +202,14 @@ if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
     target_include_directories(test_cli_engine PRIVATE cli)
     target_link_libraries(test_cli_engine PRIVATE ${PLATFORM_LIBS})
     add_test(NAME cli_engine COMMAND test_cli_engine)
+
+    # Seeded random stress test (default seeds; longer runs: fuzz_cli_engine <seed> <n> <iters>).
+    add_executable(fuzz_cli_engine
+        tests/fuzz_cli_engine.c
+        ${CLI_SOURCES})
+    target_include_directories(fuzz_cli_engine PRIVATE cli)
+    target_link_libraries(fuzz_cli_engine PRIVATE ${PLATFORM_LIBS})
+    add_test(NAME cli_engine_fuzz COMMAND fuzz_cli_engine)
 endif()
 
 # =========================================================================
@@ -305,8 +313,8 @@ endif()
 # =========================================================================
 if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION)
     set(CLI_LTO_TARGETS)
-    foreach(_t cli_shared test_cli_args_parse test_cli_engine cli_server_telnet cli_server_tcp
-               cli_server_serial cli_server_pipe cli_server_unix_socket)
+    foreach(_t cli_shared test_cli_args_parse test_cli_engine fuzz_cli_engine cli_server_telnet
+               cli_server_tcp cli_server_serial cli_server_pipe cli_server_unix_socket)
         if(TARGET ${_t})
             list(APPEND CLI_LTO_TARGETS ${_t})
         endif()

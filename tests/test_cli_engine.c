@@ -753,7 +753,8 @@ static void test_quoted_arguments(void) {
   ASSERT_NOT_OUT("ARGS");
 
   /* More words than CLI_MAX_ARGS: only testable when such a line fits the editor. */
-  if (4 + 2 * (CLI_MAX_ARGS + 2) < CLI_MAX_INPUT_LEN) {
+#if 4 + 2 * (CLI_MAX_ARGS + 2) < CLI_MAX_INPUT_LEN
+  {
     char many[4 + 2 * (CLI_MAX_ARGS + 2) + 2] = "echo";
     for (int i = 0; i < CLI_MAX_ARGS + 2; i++) {
       strcat(many, " a");
@@ -764,6 +765,7 @@ static void test_quoted_arguments(void) {
     ASSERT_OUT("% Too many arguments.");
     ASSERT_NOT_OUT("ARGS");
   }
+#endif
   TEST_END();
 }
 
@@ -2209,12 +2211,14 @@ static void test_unusable_container_hidden(void) {
 
 #if CLI_ENABLE_AUTH
 static int8_t enable_relogin_cb(cli_struct_t *cli, const char *user, const char *pass) {
+  int8_t rc = CLI_OK;
+
   (void)user;
   if (strcmp(pass, "s3") != 0) {
     cli_request_auth(cli); /* a wrong secret logs the user out */
-    return CLI_ERR_AUTH;
+    rc = CLI_ERR_AUTH;
   }
-  return CLI_OK;
+  return rc;
 }
 
 static void test_enable_callback_relogin(void) {
@@ -2867,8 +2871,1076 @@ static void test_null_safety(void) {
   ASSERT_EQ(cli_add_user(&s_cli, NULL, "pw", 0), CLI_ERR);
   ASSERT_EQ(cli_add_user(&s_cli, "", "pw", 0), CLI_ERR);
   cli_init(NULL, "x", NULL, NULL, s_pool, TEST_POOL_SIZE);
+
+  /* The built-in handlers are public: without a session they report an error. */
+  {
+    const char *argv[2] = {"help", "show"};
+    ASSERT_EQ(cli_cmd_builtin_exit(NULL, "exit", 1, argv), CLI_ERR);
+    ASSERT_EQ(cli_cmd_builtin_quit(NULL, "quit", 1, argv), CLI_ERR);
+    ASSERT_EQ(cli_cmd_builtin_enable(NULL, "enable", 1, argv), CLI_ERR);
+    ASSERT_EQ(cli_cmd_builtin_disable(NULL, "disable", 1, argv), CLI_ERR);
+    ASSERT_EQ(cli_cmd_builtin_end(NULL, "end", 1, argv), CLI_ERR);
+    ASSERT_EQ(cli_cmd_builtin_configure(NULL, "configure", 1, argv), CLI_ERR);
+#if CLI_ENABLE_HISTORY
+    ASSERT_EQ(cli_cmd_builtin_history(NULL, "history", 1, argv), CLI_ERR);
+#endif
+    ASSERT_EQ(cli_cmd_builtin_help(NULL, "help", 2, argv), CLI_ERR);
+    ASSERT_EQ(cli_cmd_builtin_clear_screen(NULL, "clear", 1, argv), CLI_ERR);
+    ASSERT_EQ(cli_cmd_builtin_usage(NULL, "usage", 1, argv), CLI_ERR);
+    ASSERT_EQ(cli_cmd_builtin_usage_commands(NULL, "commands", 1, argv), CLI_ERR);
+    ASSERT_EQ(cli_cmd_builtin_usage_keys(NULL, "keys", 1, argv), CLI_ERR);
+  }
   TEST_END();
 }
+
+/*=======================================================================================
+ * Line Editing
+ *=======================================================================================*/
+
+/* A minimal terminal: the line the cursor is on, as the output since out_clear() draws it
+ * over @p start (the line shown before, with the cursor at its end). Handles printable
+ * characters, BS, CR, LF, ESC [ K / ESC [ 2J / ESC [ H; ignores BEL. */
+static char s_screen[1024];
+static int s_screen_col;
+
+static void screen_render(const char *start) {
+  int len = (int)strlen(start);
+
+  memcpy(s_screen, start, (size_t)len + 1U);
+  s_screen_col = len;
+  for (size_t i = 0; i < s_out_len; i++) {
+    char c = s_out[i];
+
+    if (c == '\x1b' && i + 1 < s_out_len && s_out[i + 1] == '[') {
+      size_t j = i + 2;
+      while (j < s_out_len && !(s_out[j] >= 0x40 && s_out[j] <= 0x7E)) {
+        j++;
+      }
+      if (j < s_out_len && s_out[j] == 'K') {
+        len = s_screen_col;
+      } else if (j < s_out_len && s_out[j] == 'J') {
+        len = 0;
+      } else if (j < s_out_len && s_out[j] == 'H') {
+        s_screen_col = 0;
+      }
+      i = j;
+    } else if (c == '\r') {
+      s_screen_col = 0;
+    } else if (c == '\n') {
+      len = 0; /* a new, empty line */
+    } else if (c == '\b') {
+      if (s_screen_col > 0) {
+        s_screen_col--;
+      }
+    } else if (c == '\a') {
+      /* Bell. */
+    } else if ((unsigned char)c >= 0x20 && s_screen_col < (int)sizeof(s_screen) - 1) {
+      while (len < s_screen_col) {
+        s_screen[len++] = ' ';
+      }
+      s_screen[s_screen_col++] = c;
+      if (s_screen_col > len) {
+        len = s_screen_col;
+      }
+    }
+    s_screen[len] = '\0';
+  }
+  while (len > 0 && s_screen[len - 1] == ' ') {
+    s_screen[--len] = '\0'; /* spaces that erased characters */
+  }
+}
+
+/* The screen shows the prompt and the edited line, with the cursor where the editor has it. */
+#define ASSERT_SCREEN(prompt, start)                                                               \
+  do {                                                                                             \
+    char want_[sizeof(s_screen)];                                                                  \
+    size_t wl_;                                                                                    \
+    screen_render(start);                                                                          \
+    (void)snprintf(want_, sizeof(want_), "%s%s", (prompt), s_cli.input);                           \
+    wl_ = strlen(want_);                                                                           \
+    while (wl_ > 0U && want_[wl_ - 1U] == ' ') {                                                   \
+      want_[--wl_] = '\0';                                                                         \
+    }                                                                                              \
+    ASSERT_STR_EQ(s_screen, want_);                                                                \
+    ASSERT_EQ(s_screen_col, (int)strlen(prompt) + (int)s_cli.cursor);                              \
+  } while (0)
+
+static void test_line_editing_keys(void) {
+  TEST_START("line_editing_keys");
+  session_new();
+  session_start();
+
+  type("echo abc def");
+  type("\x17"); /* Ctrl-W: the word before the cursor */
+  ASSERT_STR_EQ(s_cli.input, "echo abc ");
+  type("\x17"); /* the spaces before the cursor, then the word */
+  ASSERT_STR_EQ(s_cli.input, "echo ");
+  type("xy");
+  type("\x01"); /* Ctrl-A */
+  ASSERT_EQ(s_cli.cursor, 0);
+  type("\x06\x06\x06\x06\x06"); /* Ctrl-F x5 */
+  ASSERT_EQ(s_cli.cursor, 5);
+  type("\x0b"); /* Ctrl-K */
+  ASSERT_STR_EQ(s_cli.input, "echo ");
+  type("12345");
+  type("\x1b[H");
+  ASSERT_EQ(s_cli.cursor, 0);
+  type("\x1b[F");
+  ASSERT_EQ(s_cli.cursor, 10);
+  type("\x1b[1~");
+  ASSERT_EQ(s_cli.cursor, 0);
+  type("\x1b[4~");
+  ASSERT_EQ(s_cli.cursor, 10);
+  type("\x1b[7~");
+  ASSERT_EQ(s_cli.cursor, 0);
+  type("\x1b[8~");
+  ASSERT_EQ(s_cli.cursor, 10);
+  type("\x1bOH");
+  ASSERT_EQ(s_cli.cursor, 0);
+  type("\x1bOF");
+  ASSERT_EQ(s_cli.cursor, 10);
+  type("\x1b[D\x1b[3~"); /* Left, Delete */
+  ASSERT_STR_EQ(s_cli.input, "echo 1234");
+  type("\x08"); /* Backspace sent as BS */
+  ASSERT_STR_EQ(s_cli.input, "echo 123");
+  type("\x02\x04"); /* Ctrl-B, Ctrl-D: the character under the cursor */
+  ASSERT_STR_EQ(s_cli.input, "echo 12");
+  ASSERT_EQ(s_cli.cursor, 7);
+  type("\x1b[1;5D"); /* Ctrl-Left: the modifier is ignored, the cursor moves left */
+  ASSERT_EQ(s_cli.cursor, 6);
+  type("\x01\x02\x1b[D"); /* nothing left of position 0 */
+  ASSERT_EQ(s_cli.cursor, 0);
+  type("\x05\x06\x1b[C"); /* nothing right of the end */
+  ASSERT_EQ(s_cli.cursor, 7);
+  ASSERT_SCREEN("rtr> ", "rtr> ");
+
+  out_clear();
+  type("\r");
+  ASSERT_OUT("ARGS [12]");
+  TEST_END();
+}
+
+static void test_line_editing_mid_line(void) {
+  TEST_START("line_editing_mid_line");
+  session_new();
+  session_start();
+
+  /* Edits in the middle of the line keep the screen in step with the line. */
+  type("echo one two three");
+  type("\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D"); /* before "three" */
+  type("\x17");                            /* deletes "two " */
+  ASSERT_STR_EQ(s_cli.input, "echo one three");
+  ASSERT_EQ(s_cli.cursor, 9);
+  ASSERT_SCREEN("rtr> ", "rtr> ");
+  type("X");
+  ASSERT_STR_EQ(s_cli.input, "echo one Xthree");
+  ASSERT_SCREEN("rtr> ", "rtr> ");
+  type("\x0b"); /* Ctrl-K */
+  ASSERT_STR_EQ(s_cli.input, "echo one X");
+  type("\x01\x1b[3~\x1b[3~"); /* Delete at the start */
+  ASSERT_STR_EQ(s_cli.input, "ho one X");
+  type("\x0c"); /* Ctrl-L redraws the line */
+  ASSERT_SCREEN("rtr> ", "rtr> ");
+  ASSERT_EQ(s_cli.cursor, 0);
+  TEST_END();
+}
+
+#if CLI_ENABLE_HISTORY
+static void test_history_keys(void) {
+  TEST_START("history_keys");
+  session_new();
+  session_start();
+
+  type("echo first\r");
+  type("echo second\r");
+  out_clear();
+  type("draft");
+  type("\x10"); /* Ctrl-P */
+  ASSERT_STR_EQ(s_cli.input, "echo second");
+  type("\x10");
+  ASSERT_STR_EQ(s_cli.input, "echo first");
+  out_clear();
+  type("\x10"); /* the oldest entry: bell */
+  ASSERT_OUT("\a");
+  ASSERT_STR_EQ(s_cli.input, "echo first");
+  type("\x0e"); /* Ctrl-N */
+  ASSERT_STR_EQ(s_cli.input, "echo second");
+  type("\x1b[B"); /* Down: back to the line being typed */
+#if CLI_HISTORY_RESTORE_PREBROWSE_LINE
+  ASSERT_STR_EQ(s_cli.input, "draft");
+#else
+  ASSERT_STR_EQ(s_cli.input, "");
+#endif
+  out_clear();
+  type("\x0e"); /* already at the tip: bell, line unchanged */
+  ASSERT_OUT("\a");
+  out_clear();
+  type("\x10\x1bOB"); /* SS3 Down */
+  ASSERT_SCREEN("rtr> ", (CLI_HISTORY_RESTORE_PREBROWSE_LINE ? "rtr> draft" : "rtr> "));
+  TEST_END();
+}
+#endif
+
+static void test_escape_sequences(void) {
+  TEST_START("escape_sequences");
+  session_new();
+  session_start();
+
+  type("ab");
+  type("\x1bx"); /* Alt-x: the ESC is dropped, x is typed */
+  ASSERT_STR_EQ(s_cli.input, "abx");
+  type("\x1b\x1b[D"); /* a repeated ESC starts over */
+  ASSERT_EQ(s_cli.cursor, 2);
+  type("\x1b[\x1b[D"); /* ESC inside a sequence starts a new one */
+  ASSERT_EQ(s_cli.cursor, 1);
+  type("\x1b[?25h");  /* private sequence: ignored */
+  type("\x1b[200~");  /* bracketed paste marker: ignored */
+  type("\x1b[ q");    /* intermediate byte: ignored */
+  type("\x1bO5");     /* malformed SS3: the byte is dropped */
+  ASSERT_STR_EQ(s_cli.input, "abx");
+  ASSERT_EQ(s_cli.cursor, 1);
+  type("\x1bO\x05"); /* control byte after ESC O: processed (Ctrl-E) */
+  ASSERT_EQ(s_cli.cursor, 3);
+  ASSERT_STR_EQ(s_cli.input, "abx");
+  type("\x1b[\x01"); /* control byte inside CSI: the sequence ends, Ctrl-A acts */
+  ASSERT_EQ(s_cli.cursor, 0);
+  out_clear();
+  type("\x15" "echo z\x1b[\r"); /* Enter inside a sequence submits the line */
+  ASSERT_OUT("ARGS [z]");
+  TEST_END();
+}
+
+#if CLI_ENABLE_AUTH
+static void test_login_line_editing(void) {
+  TEST_START("login_line_editing");
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_PRIVILEGED);
+  cli_require_authorization(&s_cli, true);
+  session_start();
+
+  /* Username: echoed, Backspace and Ctrl-U erase what was typed. */
+  type("adx\x7f");
+  ASSERT_STR_EQ(s_cli.input, "ad");
+  type("\x15");
+  ASSERT_STR_EQ(s_cli.input, "");
+  ASSERT_SCREEN("Username: ", "Username: ");
+  type("admjn\x08\x08in\r");
+  /* Password: nothing is echoed, not even the erasing. */
+  out_clear();
+  type("zz\x7f\x7fpq\x0b");
+  ASSERT_STR_EQ(s_out, "");
+  ASSERT_STR_EQ(s_cli.input, "");
+  type("pw\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  TEST_END();
+}
+#endif
+
+/*=======================================================================================
+ * Session Hooks and Policies
+ *=======================================================================================*/
+
+static int s_exit_hook_calls;
+static int8_t s_exit_hook_rc;
+
+static int8_t exit_hook(cli_struct_t *cli) {
+  (void)cli;
+  s_exit_hook_calls++;
+  return s_exit_hook_rc;
+}
+
+static void test_exit_root_policies(void) {
+  TEST_START("exit_root_policies");
+  session_new();
+  cli_set_exit_root_policy(&s_cli, CLI_EXIT_ROOT_POLICY_IGNORE);
+  session_start();
+
+  ASSERT_EQ(type("exit\r"), CLI_OK);
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_RUN);
+
+  type("echo keep\r");
+  cli_set_exit_root_policy(&s_cli, CLI_EXIT_ROOT_POLICY_RESET_SESSION);
+#if CLI_ENABLE_BANNER
+  ASSERT_EQ(cli_set_banner(&s_cli, "WELCOME"), CLI_OK);
+#endif
+  out_clear();
+  ASSERT_EQ(type("exit\r"), CLI_OK);
+#if CLI_ENABLE_BANNER
+  ASSERT_OUT("WELCOME");
+#endif
+  ASSERT_OUT("rtr> ");
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_RUN);
+#if CLI_ENABLE_HISTORY
+  ASSERT_EQ(s_cli.history_count, 0); /* a fresh logical session */
+#endif
+
+  cli_set_exit_root_policy(&s_cli, CLI_EXIT_ROOT_POLICY_CLOSE_SESSION);
+  ASSERT_EQ(type("exit\r"), CLI_ERR_QUIT);
+  TEST_END();
+}
+
+static void test_exit_hook(void) {
+  TEST_START("exit_hook");
+  session_new();
+  cli_set_exit_cb(&s_cli, exit_hook);
+  session_start();
+  s_exit_hook_calls = 0;
+
+  /* A hook that refuses keeps the session where it is, in a submenu too. */
+  s_exit_hook_rc = CLI_ERR;
+  type("calc\r");
+  ASSERT_EQ(s_cli.nav_depth, 1);
+  ASSERT_EQ(type("exit\r"), CLI_OK);
+  ASSERT_EQ(s_cli.nav_depth, 1);
+  ASSERT_EQ(s_exit_hook_calls, 1);
+
+  s_exit_hook_rc = CLI_OK;
+  type("exit\r");
+  ASSERT_EQ(s_cli.nav_depth, 0);
+  ASSERT_EQ(type("exit\r"), CLI_ERR_QUIT);
+  ASSERT_EQ(s_exit_hook_calls, 3);
+  TEST_END();
+}
+
+static int s_mode_cb_calls;
+static cli_mode_t s_mode_cb_mode;
+static cli_priv_t s_mode_cb_priv;
+
+static void mode_cb(cli_struct_t *cli, cli_mode_t mode, cli_priv_t priv) {
+  (void)cli;
+  s_mode_cb_calls++;
+  s_mode_cb_mode = mode;
+  s_mode_cb_priv = priv;
+}
+
+static void test_mode_change_callback(void) {
+  TEST_START("mode_change_callback");
+  session_new();
+  cli_set_mode_change_cb(&s_cli, mode_cb);
+  session_start();
+  s_mode_cb_calls = 0;
+
+  type("enable\r");
+  ASSERT_EQ(s_mode_cb_mode, CLI_MODE_ENABLE);
+  ASSERT_EQ(s_mode_cb_priv, CLI_PRIV_PRIVILEGED);
+  type("configure\r");
+  ASSERT_EQ(s_mode_cb_mode, CLI_MODE_CONFIG);
+  int calls = s_mode_cb_calls;
+  type("exit\r");
+  ASSERT_EQ(s_mode_cb_calls, calls + 1);
+  ASSERT_EQ(s_mode_cb_mode, CLI_MODE_ENABLE);
+  type("disable\r");
+  ASSERT_EQ(s_mode_cb_mode, CLI_MODE_EXEC);
+  ASSERT_EQ(s_mode_cb_priv, CLI_PRIV_USER);
+  TEST_END();
+}
+
+static int8_t cmd_release(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                           const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  cli_done(cli); /* a shutdown command releasing its own session */
+  return CLI_OK;
+}
+
+static void test_session_accessors(void) {
+  int data = 7;
+
+  TEST_START("session_accessors");
+  session_new();
+
+  ASSERT_TRUE(cli_get_userdata(&s_cli) == NULL);
+  cli_set_userdata(&s_cli, &data);
+  ASSERT_TRUE(cli_get_userdata(&s_cli) == &data);
+  ASSERT_TRUE(cli_get_userdata(NULL) == NULL);
+  ASSERT_EQ(cli_get_transport_kind(NULL), CLI_TRANSPORT_UNKNOWN);
+  ASSERT_EQ(cli_get_transport_kind(&s_cli), s_cli.transport.kind);
+
+  /* cli_done() leaves a stopped session behind. */
+  session_start();
+  cli_done(&s_cli);
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_STOP);
+  ASSERT_TRUE(cli_get_userdata(&s_cli) == NULL);
+  ASSERT_EQ(cli_session_engine(&s_cli), CLI_ERR);
+  cli_done(NULL);
+
+  /* Released by one of its own commands: the session ends there, nothing more runs. */
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "release", cmd_release, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  session_start();
+  ASSERT_TRUE(type("release\recho after\r") != CLI_OK);
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_STOP);
+  ASSERT_NOT_OUT("ARGS [after]");
+  TEST_END();
+}
+
+static bool s_available_fails;
+static bool s_read_fails;
+
+static cli_transport_ret_t t_available_err(void *ctx) {
+  return s_available_fails ? -1 : t_available(ctx);
+}
+
+static cli_transport_ret_t t_read_err(void *ctx) {
+  return s_read_fails ? -1 : t_read(ctx);
+}
+
+static void test_transport_read_errors(void) {
+  TEST_START("transport_read_errors");
+  session_new();
+  s_cli.transport.available = t_available_err;
+  s_cli.transport.read = t_read_err;
+  s_available_fails = false;
+  s_read_fails = false;
+  session_start();
+
+  /* A failing available() or read() ends the session with CLI_ERR. */
+  s_available_fails = true;
+  ASSERT_EQ(cli_session_engine(&s_cli), CLI_ERR);
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_STOP);
+  s_available_fails = false;
+
+  cli_start(&s_cli);
+  (void)run();
+  s_read_fails = true;
+  ASSERT_EQ(type("x"), CLI_ERR);
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_STOP);
+  s_read_fails = false;
+  TEST_END();
+}
+
+#if CLI_ENABLE_PERIODIC_CALLBACK && CLI_ENABLE_TIME_SOURCE
+static int8_t periodic_fails(cli_struct_t *cli) {
+  (void)cli;
+  return CLI_ERR_QUIT;
+}
+
+static void test_periodic_callback_ends_session(void) {
+  TEST_START("periodic_callback_ends_session");
+  session_new();
+  cli_set_periodic_cb(&s_cli, periodic_fails);
+  cli_set_periodic_interval(&s_cli, 5U);
+  session_start();
+
+  s_now += 5U;
+  ASSERT_EQ(cli_session_engine(&s_cli), CLI_ERR_QUIT); /* its result is the engine's */
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_STOP);
+  TEST_END();
+}
+#endif
+
+static char s_print_cb_text[64];
+static cli_print_kind_enum_t s_print_cb_kind;
+
+static void capture_print(cli_struct_t *cli, const char *text, cli_print_kind_enum_t kind) {
+  (void)cli;
+  (void)snprintf(s_print_cb_text, sizeof(s_print_cb_text), "%s", text);
+  s_print_cb_kind = kind;
+}
+
+static void test_print_callback(void) {
+  TEST_START("print_callback");
+  session_new();
+  session_start();
+  cli_set_print_cb(&s_cli, capture_print);
+
+  /* The formatted text, with the function it came from; nothing reaches the transport. */
+  ASSERT_EQ(cli_print(&s_cli, "a=%d", 1), 3);
+  ASSERT_STR_EQ(s_print_cb_text, "a=1");
+  ASSERT_EQ(s_print_cb_kind, CLI_PRINT_KIND_PRINT);
+  ASSERT_EQ(cli_println(&s_cli, "b"), 3);
+  ASSERT_EQ(s_print_cb_kind, CLI_PRINT_KIND_PRINTLN);
+  ASSERT_EQ(cli_error(&s_cli, "c"), 5);
+  ASSERT_STR_EQ(s_print_cb_text, "c");
+  ASSERT_EQ(s_print_cb_kind, CLI_PRINT_KIND_ERROR);
+  ASSERT_STR_EQ(s_out, "");
+  cli_set_print_cb(&s_cli, NULL);
+  ASSERT_EQ(cli_println(&s_cli, "d"), 3);
+  ASSERT_OUT("d\r\n");
+  TEST_END();
+}
+
+static void test_clear_command(void) {
+  TEST_START("clear_command");
+  session_new();
+  session_start();
+
+  type("clear\r");
+  ASSERT_OUT("\x1b[2J");
+  out_clear();
+  cli_set_ansi_supported(&s_cli, false);
+  type("clear\r");
+  ASSERT_NOT_OUT("\x1b");
+  ASSERT_OUT("Clear not supported");
+  TEST_END();
+}
+
+#if CLI_ENABLE_PIPE_FILTER
+static void test_begin_and_count_filters(void) {
+  TEST_START("begin_and_count_filters");
+  session_new();
+  session_start();
+
+  type("usage keys | begin Ctrl-U\r");
+  ASSERT_NOT_OUT("Ctrl-B/F");
+  ASSERT_OUT("Ctrl-U   clear line");
+  ASSERT_OUT("Ctrl-W   delete prev word"); /* every line after the first match */
+  out_clear();
+  type("usage keys | begin nothing-like-this\r");
+  ASSERT_NOT_OUT("Ctrl");
+
+  out_clear();
+  type("usage keys | count x\r");
+  ASSERT_OUT("% The count filter takes no pattern.");
+  ASSERT_NOT_OUT("Ctrl");
+  out_clear();
+  type("usage keys | include \"a\" b\r");
+  ASSERT_OUT("% Invalid filter pattern.");
+  out_clear();
+  type("usage keys | include \"\"\r");
+  ASSERT_OUT("% Invalid filter pattern.");
+  out_clear();
+  type("usage keys | include Ctrl-K \t \r"); /* trailing blanks are not part of the pattern */
+  ASSERT_OUT("Ctrl-K   delete to EOL");
+  TEST_END();
+}
+#endif
+
+#if CLI_ENABLE_TIMMING_STATS
+static uint32_t s_micros;
+
+static uint32_t t_micros(void *ctx) {
+  (void)ctx;
+  s_micros += 10U; /* every reading 10 us later */
+  return s_micros;
+}
+
+static uint32_t t_micros_far(void *ctx) {
+  (void)ctx;
+  return 5000000U; /* another clock, far from the first */
+}
+
+static int8_t cmd_clock_on(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                           const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  cli_set_micros_source(cli, t_micros_far, NULL);
+  return CLI_OK;
+}
+
+static void test_tick_stats(void) {
+  cli_tick_stats_struct_t st;
+
+  TEST_START("tick_stats");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "clockon", cmd_clock_on, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  session_start();
+
+  /* No clock: nothing is measured. */
+  cli_tick_stats_get(&s_cli, &st);
+  ASSERT_EQ(st.count, 0U);
+
+  /* A clock installed during a tick: that tick has no start time, it is not measured. */
+  type("clockon\r");
+  cli_tick_stats_get(&s_cli, &st);
+  ASSERT_EQ(st.max_us, 0U);
+
+  /* A clock replaced during a tick: the two readings are from different clocks. */
+  cli_set_micros_source(&s_cli, t_micros, NULL);
+  cli_tick_stats_reset(&s_cli);
+  type("clockon\r");
+  cli_tick_stats_get(&s_cli, &st);
+  ASSERT_TRUE(st.max_us < 1000U);
+
+  cli_set_micros_source(&s_cli, t_micros, NULL);
+  cli_tick_stats_reset(&s_cli);
+  s_micros = 0U;
+  (void)cli_session_engine(&s_cli);
+  (void)cli_session_engine(&s_cli);
+  cli_tick_stats_get(&s_cli, &st);
+  ASSERT_EQ(st.count, 2U);
+  ASSERT_EQ(st.min_us, 10U);
+  ASSERT_EQ(st.max_us, 10U);
+  ASSERT_EQ(st.avg_us, 10U);
+  cli_tick_stats_get(NULL, &st);
+  ASSERT_EQ(st.count, 0U);
+
+  /* cli_done() reports the statistics before releasing the session. */
+  out_clear();
+  cli_set_micros_source(&s_cli, t_micros, NULL);
+  (void)cli_session_engine(&s_cli);
+  cli_done(&s_cli);
+  ASSERT_OUT("--- Tick Timing Stats ---");
+  TEST_END();
+}
+#endif
+
+/*=======================================================================================
+ * Abbreviations, Inline Help and Limits
+ *=======================================================================================*/
+
+static void test_abbreviated_commands(void) {
+  TEST_START("abbreviated_commands");
+  session_new();
+  session_start();
+
+  type("ech hi\r"); /* a unique prefix runs the command */
+  ASSERT_OUT("ARGS [hi]");
+  out_clear();
+  type("show ver\r");
+  ASSERT_OUT("RAN:version");
+  out_clear();
+  type("al\r"); /* alpha, alpine */
+  ASSERT_OUT("% Ambiguous command: al");
+  ASSERT_NOT_OUT("RAN:");
+  ASSERT_EQ(cli_exec(&s_cli, "al"), CLI_ERR_AMBIG);
+  out_clear();
+  type("show\r"); /* a container without a handler */
+  ASSERT_OUT("% Incomplete command.");
+  out_clear();
+  type("usage\r"); /* a container with a handler runs it */
+  ASSERT_OUT("Usage information.");
+  type("exit\r");
+#if CLI_ENABLE_COMMAND_HELP
+  out_clear();
+  type("help al\r");
+  ASSERT_OUT("% Ambiguous command.");
+#endif
+#if CLI_ENABLE_HISTORY
+  session_new();
+  session_start();
+  ASSERT_EQ(cli_exec(&s_cli, "history"), CLI_OK); /* not typed: nothing recorded */
+  ASSERT_OUT("History is empty.");
+#endif
+  TEST_END();
+}
+
+#if CLI_ENABLE_TAB_COMPLETION
+static void test_tab_lists_candidates(void) {
+  TEST_START("tab_lists_candidates");
+  session_new();
+  session_start();
+
+  /* "a": alpha, alpine, ask share only the typed letter: Tab lists them, the line stays. */
+  type("a\t");
+  ASSERT_OUT("alpha");
+  ASSERT_OUT("alpine");
+  ASSERT_OUT("ask");
+  ASSERT_STR_EQ(s_cli.input, "a");
+  ASSERT_OUT("rtr> a"); /* the line is drawn again below the list */
+  TEST_END();
+}
+#endif
+
+static int8_t cmd_returns_one(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                              const char *argv[]) {
+  (void)cli;
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  return 1; /* outside the handler contract; it is CLI_EXEC_REPLAY_INPUT's value */
+}
+
+static void test_handler_result_one_keeps_prompt(void) {
+  TEST_START("handler_result_one_keeps_prompt");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "one", cmd_returns_one, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  session_start();
+
+  /* No history entry is being recalled, so the next prompt is shown as usual. */
+  ASSERT_EQ(type("one\r"), CLI_OK);
+  ASSERT_OUT("rtr> ");
+  ASSERT_STR_EQ(s_cli.input, "");
+  TEST_END();
+}
+
+#if CLI_ENABLE_HISTORY && CLI_HISTORY_INDEX_SELECTION
+static int8_t cmd_nested_recall(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                                const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  return cli_exec(cli, "history 1");
+}
+
+static void test_history_index_recall(void) {
+  TEST_START("history_index_recall");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "recall", cmd_nested_recall, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  session_start();
+
+  type("echo one\r");
+  type("echo two\r");
+  out_clear();
+  type("history 1\r"); /* the oldest entry, loaded for editing */
+  ASSERT_STR_EQ(s_cli.input, "echo one");
+  ASSERT_EQ(s_cli.cursor, 8);
+  ASSERT_OUT("rtr> echo one");
+  ASSERT_EQ(s_cli.history_count, 2); /* 'history N' itself is not recorded */
+  out_clear();
+  type("\r");
+  ASSERT_OUT("ARGS [one]");
+
+  /* Invalid indexes. */
+  out_clear();
+  type("history 0\r");
+  ASSERT_OUT("% Invalid history index.");
+  out_clear();
+  type("history 99\r");
+  ASSERT_OUT("% Invalid history index.");
+  out_clear();
+  type("history x\r");
+  ASSERT_OUT("% Invalid history index.");
+  out_clear();
+  type("history 1 2\r");
+  ASSERT_OUT("% Invalid history index.");
+  ASSERT_STR_EQ(s_cli.input, "");
+
+  /* From cli_exec() outside any command: loaded when the editor is free, else dropped. */
+  ASSERT_EQ(cli_exec(&s_cli, "history 2"), CLI_EXEC_REPLAY_INPUT);
+  ASSERT_STR_EQ(s_cli.input, "echo two");
+  type("\x15" "abc");
+  ASSERT_EQ(cli_exec(&s_cli, "history 2"), CLI_OK);
+  ASSERT_STR_EQ(s_cli.input, "abc");
+
+  /* From inside another command: discarded, the editor stays free. */
+  type("\x15");
+  out_clear();
+  ASSERT_EQ(type("recall\r"), CLI_OK);
+  ASSERT_STR_EQ(s_cli.input, "");
+  ASSERT_OUT("rtr> ");
+  TEST_END();
+}
+#endif
+
+static void test_submenu_hides_shadowed_root_command(void) {
+  TEST_START("submenu_hides_shadowed_root_command");
+  session_new();
+  /* "ar" is a root command and a prefix of "arith" in the calc submenu. */
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "ar", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "AR");
+  session_start();
+
+  type("calc\r");
+  out_clear();
+  type("?");
+  ASSERT_OUT("arith");
+  ASSERT_NOT_OUT("  ar ");
+  /* ... because typing it selects the submenu command, as '?' says. */
+  type("\x15" "ar\r");
+  ASSERT_NOT_OUT("RAN:ar");
+  ASSERT_EQ(s_cli.nav_depth, 2);
+  TEST_END();
+}
+
+static void test_inline_help_errors(void) {
+  TEST_START("inline_help_errors");
+  session_new();
+  session_start();
+
+  type("zz?");
+  ASSERT_OUT("% Unknown command.");
+  ASSERT_STR_EQ(s_cli.input, "zz"); /* the line stays for editing */
+  out_clear();
+  type("\x15" "zz ?");
+  ASSERT_OUT("% Unknown command.");
+  out_clear();
+  type("\x15" "al ?");
+  ASSERT_OUT("% Ambiguous command.");
+
+  /* Inside quotes '?' is text, also after an escaped quote. */
+  type("\x15" "echo \"a\\\"?");
+  ASSERT_STR_EQ(s_cli.input, "echo \"a\\\"?");
+
+#if CLI_ENABLE_TAB_COMPLETION
+  /* Tab inside a word with an escaped quote moves to the end of that whole word. */
+  type("\x15" "echo \"a\\\"b\" x\x01\x06\x06\x06\x06\x06\t"); /* from before the quote */
+  ASSERT_EQ(s_cli.cursor, 11);                                   /* after "a\"b" */
+#endif
+
+  /* More words than CLI_MAX_ARGS: only testable when such a line fits the editor. */
+#if 2 * CLI_MAX_ARGS < CLI_MAX_INPUT_LEN
+  type("\x15");
+  for (int i = 0; i < CLI_MAX_ARGS; i++) {
+    type("a ");
+  }
+  out_clear();
+  type("?");
+  ASSERT_OUT("% Too many arguments.");
+#endif
+
+#if CLI_ENABLE_PIPE_FILTER
+  out_clear();
+  type("\x15" "echo x | zz?");
+  ASSERT_OUT("% Invalid filter (use grep, include, exclude, begin or count).");
+  out_clear();
+  type("\x15" "echo x | count y?");
+  ASSERT_OUT("% The count filter takes no pattern.");
+  out_clear();
+  type("\x15" "echo x | count ?");
+  ASSERT_OUT("  <cr>");
+  out_clear();
+  type("\x15" "echo x | include x ?"); /* the pattern is complete */
+  ASSERT_OUT("  <cr>");
+#if CLI_ENABLE_TAB_COMPLETION
+  out_clear();
+  type("\x15" "echo x | zz\t");
+  ASSERT_OUT("\a");
+  ASSERT_STR_EQ(s_cli.input, "echo x | zz");
+#endif
+#endif
+  TEST_END();
+}
+
+static int8_t cmd_flush_part(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                             const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  cli_print(cli, "part");
+  cli_print_flush(cli); /* "part" is a line of its own now */
+  cli_print(cli, "rest\n");
+  return CLI_OK;
+}
+
+static void test_flush_and_restart_deliver_partial_lines(void) {
+  TEST_START("flush_and_restart_deliver_partial_lines");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "flushpart", cmd_flush_part, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "bye", cmd_bye, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  session_start();
+
+#if CLI_ENABLE_PIPE_FILTER
+  type("flushpart | include part\r");
+  ASSERT_OUT("part\r\n");
+  ASSERT_NOT_OUT("rest");
+  out_clear();
+  type("bye | include Good\r"); /* restarted with "Goodbye" still buffered */
+  ASSERT_OUT("Goodbye");
+  ASSERT_NOT_OUT("line one");
+#else
+  type("flushpart\r");
+  ASSERT_OUT("partrest");
+#endif
+
+#if CLI_ENABLE_PRINT_TRANSPORT_CB
+  /* Printed outside any command (e.g. by a periodic callback), then restarted there: the
+   * buffered partial line still reaches the per-line consumer. */
+  s_transport_lines = 0;
+  s_last_line[0] = '\0';
+  cli_set_print_transport_cb(&s_cli, capture_line);
+  (void)cli_print(&s_cli, "async");
+  cli_restart_session(&s_cli);
+  ASSERT_STR_EQ(s_last_line, "async");
+  cli_set_print_transport_cb(&s_cli, NULL);
+#endif
+  TEST_END();
+}
+
+static int8_t cmd_menu_item(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                            const char *argv[]) {
+  (void)cli;
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  return CLI_OK;
+}
+
+static void fill_navigation_stack(void) {
+  cli_mode_t m = (cli_mode_t)(CLI_MODE_USER_BASE + 10);
+
+  while (cli_set_mode(&s_cli, m) == CLI_OK) {
+    m++;
+  }
+}
+
+static void test_navigation_depth_limit_messages(void) {
+  cli_cmd_handle_t menu;
+
+  TEST_START("navigation_depth_limit_messages");
+  session_new();
+  menu = cli_add_command(&s_cli, CLI_CMD_ROOT, "menu", cmd_menu_item, CLI_PRIV_USER, CLI_MODE_ANY,
+                         "Submenu");
+  (void)cli_add_command(&s_cli, menu, "item", cmd_menu_item, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  session_start();
+
+  fill_navigation_stack();
+  ASSERT_EQ(s_cli.nav_depth, CLI_MAX_CONTEXT_DEPTH);
+  out_clear();
+  ASSERT_EQ(cli_cmd_builtin_enable(&s_cli, "enable", 1, NULL), CLI_ERR_NOMEM);
+  ASSERT_OUT("% Navigation depth limit reached.");
+  out_clear();
+  ASSERT_EQ(cli_cmd_builtin_configure(&s_cli, "configure", 1, NULL), CLI_ERR_NOMEM);
+  ASSERT_OUT("% Navigation depth limit reached.");
+  out_clear();
+  ASSERT_EQ(cli_exec(&s_cli, "menu"), CLI_ERR_NOMEM); /* the submenu cannot be entered */
+  ASSERT_OUT("% Navigation depth limit reached.");
+  ASSERT_EQ(s_cli.context, CLI_CMD_ROOT);
+
+#if CLI_ENABLE_AUTH
+  /* The enable password is right, but there is no level left to enter. */
+  session_new();
+  cli_set_enable_secret(&s_cli, "s3cret");
+  session_start();
+  fill_navigation_stack();
+  (void)cli_cmd_builtin_enable(&s_cli, "enable", 1, NULL);
+  out_clear();
+  type("s3cret\r");
+  ASSERT_OUT("% Navigation depth limit reached.");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+#endif
+  TEST_END();
+}
+
+static void test_tables_full(void) {
+  char name[16];
+
+  TEST_START("tables_full");
+  session_new();
+
+#if CLI_ENABLE_AUTH
+  for (int i = 0; i < CLI_MAX_USERS; i++) {
+    (void)snprintf(name, sizeof(name), "u%d", i);
+    ASSERT_EQ(cli_add_user(&s_cli, name, "pw", CLI_PRIV_USER), CLI_OK);
+  }
+  ASSERT_EQ(cli_add_user(&s_cli, "extra", "pw", CLI_PRIV_USER), CLI_ERR_NOMEM);
+#endif
+#if CLI_ENABLE_MODE_NAMES
+  {
+    int8_t rc = CLI_OK;
+    for (int i = 0; i < CLI_MAX_MODES + 1 && rc == CLI_OK; i++) {
+      (void)snprintf(name, sizeof(name), "m%d", i);
+      rc = cli_set_mode_name(&s_cli, (cli_mode_t)(CLI_MODE_USER_BASE + 20 + i), name);
+    }
+    ASSERT_EQ(rc, CLI_ERR_NOMEM);
+  }
+#endif
+#if CLI_ENABLE_ALIASES
+  {
+    cli_cmd_handle_t h = cli_add_command(&s_cli, CLI_CMD_ROOT, "target", cmd_name, CLI_PRIV_USER,
+                                         CLI_MODE_ANY, "");
+    for (int i = 0; i < CLI_MAX_ALIASES; i++) {
+      (void)snprintf(name, sizeof(name), "tg%d", i);
+      ASSERT_EQ(cli_cmd_add_alias(&s_cli, h, name), CLI_OK);
+    }
+    ASSERT_EQ(cli_cmd_add_alias(&s_cli, h, "tgx"), CLI_ERR_NOMEM);
+  }
+#endif
+  {
+    /* An argv line longer than the input buffer is not run cut short. */
+    static char big[CLI_MAX_INPUT_LEN + 8];
+    const char *argv[2] = {"echo", big};
+
+    memset(big, 'b', sizeof(big) - 1U);
+    big[sizeof(big) - 1U] = '\0';
+    session_start();
+    out_clear();
+    ASSERT_EQ(cli_exec_argv(&s_cli, argv, 2), CLI_ERR_NOMEM);
+    ASSERT_NOT_OUT("ARGS");
+  }
+  TEST_END();
+}
+
+#if CLI_ENABLE_PERIODIC_CALLBACK && CLI_ENABLE_TIME_SOURCE
+static int8_t periodic_quits(cli_struct_t *cli) {
+  return (cli_exec(cli, "quit") == CLI_ERR_QUIT) ? CLI_OK : CLI_ERR;
+}
+#endif
+
+static void test_misc_api(void) {
+  int v = 0;
+  cli_transport_struct_t tp;
+
+  TEST_START("misc_api");
+  cli_lib_init();
+  ASSERT_EQ(cli_sscanf("42", "%d", &v), 1);
+  ASSERT_EQ(v, 42);
+  ASSERT_EQ(cli_sscanf("x", "%d", &v), 0); /* no match */
+  ASSERT_EQ(cli_sscanf("", "%d", &v), 0);  /* empty: a failure too, not EOF */
+  ASSERT_EQ(cli_sscanf(NULL, "%d", &v), 0);
+  ASSERT_EQ(v, 42);
+
+  /* No pool: no command can be registered. */
+  memset(&tp, 0, sizeof(tp));
+  tp.available = t_available;
+  tp.read = t_read;
+  tp.write = t_write;
+  cli_init(&s_cli, "x", &tp, NULL, NULL, 8);
+  ASSERT_EQ(s_cli.cmd_pool_size, 0);
+  ASSERT_EQ(cli_add_command(&s_cli, CLI_CMD_ROOT, "a", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, ""),
+            CLI_CMD_INVALID);
+#if CLI_ENABLE_TIME_SOURCE && ENV_IS_OS_ENVIRONMENT
+  /* No platform clock on a host: the OS clock is used. */
+  ASSERT_TRUE(s_cli.time_source != NULL);
+  ASSERT_TRUE(s_cli.time_source(s_cli.time_source_ctx) > 0U);
+#endif
+#if CLI_ENABLE_TIMMING_STATS
+  {
+    cli_platform_struct_t pf;
+    memset(&pf, 0, sizeof(pf));
+    pf.micros = t_micros;
+    cli_init(&s_cli, "x", &tp, &pf, s_pool, TEST_POOL_SIZE);
+    ASSERT_TRUE(s_cli.micros_source == t_micros);
+  }
+#endif
+
+#if CLI_ENABLE_IDLE_TIMEOUT
+  /* cli_touch_activity() restarts the idle period. */
+  session_new();
+  cli_set_idle_timeout(&s_cli, 10U);
+  session_start();
+  s_now += 8U;
+  cli_touch_activity(&s_cli);
+  s_now += 8U;
+  ASSERT_EQ(cli_session_engine(&s_cli), CLI_OK);
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_RUN);
+#endif
+
+#if CLI_ENABLE_PERIODIC_CALLBACK && CLI_ENABLE_TIME_SOURCE
+  /* A periodic callback that stops the session through a command ends the tick. */
+  session_new();
+  cli_set_periodic_cb(&s_cli, periodic_quits);
+  cli_set_periodic_interval(&s_cli, 5U);
+  session_start();
+  s_now += 5U;
+  ASSERT_EQ(cli_session_engine(&s_cli), CLI_ERR_QUIT);
+#endif
+  TEST_END();
+}
+
+#if CLI_ENABLE_AUTH
+static void test_login_input_details(void) {
+  TEST_START("login_input_details");
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_PRIVILEGED);
+  cli_require_authorization(&s_cli, true);
+  session_start();
+
+  /* The field takes one character more than a valid name (so that one never matches); a
+   * character after that rings the bell. */
+  for (int i = 0; i < CLI_MAX_USERNAME_LEN; i++) {
+    type("u");
+  }
+  ASSERT_NOT_OUT("\a");
+  type("u");
+  ASSERT_OUT("\a");
+  ASSERT_EQ(s_cli.input_len, CLI_MAX_USERNAME_LEN);
+  type("\x15");
+  type("admin\r\npw\r\n"); /* CR LF endings: no empty line in between */
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  out_clear();
+  type("\x1bO\x1b[D\x1b[Z"); /* SS3 interrupted by a CSI; an unknown key (Shift-Tab) */
+  ASSERT_STR_EQ(s_cli.input, "");
+  ASSERT_STR_EQ(s_out, "");
+  TEST_END();
+}
+#endif
 
 /*=======================================================================================
  * Main
@@ -3067,6 +4139,54 @@ int main(void) {
   RUN_SUITE(test_tab_keeps_exact_alias);
 #endif
   RUN_SUITE(test_exit_after_current_submenu_removed);
+
+  printf("\n--- line editing ---\n");
+  RUN_SUITE(test_line_editing_keys);
+  RUN_SUITE(test_line_editing_mid_line);
+#if CLI_ENABLE_HISTORY
+  RUN_SUITE(test_history_keys);
+#endif
+  RUN_SUITE(test_escape_sequences);
+#if CLI_ENABLE_AUTH
+  RUN_SUITE(test_login_line_editing);
+#endif
+
+  printf("\n--- session hooks ---\n");
+  RUN_SUITE(test_exit_root_policies);
+  RUN_SUITE(test_exit_hook);
+  RUN_SUITE(test_mode_change_callback);
+  RUN_SUITE(test_session_accessors);
+  RUN_SUITE(test_transport_read_errors);
+#if CLI_ENABLE_PERIODIC_CALLBACK && CLI_ENABLE_TIME_SOURCE
+  RUN_SUITE(test_periodic_callback_ends_session);
+#endif
+  RUN_SUITE(test_print_callback);
+  RUN_SUITE(test_clear_command);
+#if CLI_ENABLE_PIPE_FILTER
+  RUN_SUITE(test_begin_and_count_filters);
+#endif
+#if CLI_ENABLE_TIMMING_STATS
+  RUN_SUITE(test_tick_stats);
+#endif
+
+  printf("\n--- abbreviations and limits ---\n");
+  RUN_SUITE(test_abbreviated_commands);
+#if CLI_ENABLE_TAB_COMPLETION
+  RUN_SUITE(test_tab_lists_candidates);
+#endif
+  RUN_SUITE(test_handler_result_one_keeps_prompt);
+#if CLI_ENABLE_HISTORY && CLI_HISTORY_INDEX_SELECTION
+  RUN_SUITE(test_history_index_recall);
+#endif
+  RUN_SUITE(test_submenu_hides_shadowed_root_command);
+  RUN_SUITE(test_inline_help_errors);
+  RUN_SUITE(test_flush_and_restart_deliver_partial_lines);
+  RUN_SUITE(test_navigation_depth_limit_messages);
+  RUN_SUITE(test_tables_full);
+  RUN_SUITE(test_misc_api);
+#if CLI_ENABLE_AUTH
+  RUN_SUITE(test_login_input_details);
+#endif
 
   printf("\n--- robustness ---\n");
   RUN_SUITE(test_write_error_ends_session);
