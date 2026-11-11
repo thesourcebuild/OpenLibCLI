@@ -340,35 +340,41 @@ static cli_transport_ret_t fd_read_raw(int32_t fd) {
 static cli_transport_ret_t fd_write_raw(int32_t fd, const uint8_t *buf,
                                         cli_transport_buflen_t len) {
   size_t sent = 0;
+  cli_transport_ret_t result = (cli_transport_ret_t)len;
 
-  while (sent < (size_t)len) {
+  while (sent < (size_t)len && result >= 0) {
     ssize_t n = write(fd, &buf[sent], (size_t)len - sent);
-    if (n < 0 && errno == EINTR) {
-      continue;
+    if (n > 0) {
+      sent += (size_t)n;
+    } else if (n < 0 && errno == EINTR) {
+      /* Interrupted by a signal: write the rest again. */
+    } else {
+      result = -1;
     }
-    if (n <= 0) {
-      return -1;
-    }
-    sent += (size_t)n;
   }
 
-  return (cli_transport_ret_t)len;
+  return result;
 }
 
 /**
- * @brief Transport read callback for the POSIX fd transport.
+ * @brief Transport available callback for the POSIX fd transport.
  *
- * @param[in]  ctx  Internal fd-pair context.
- * @param[out] buf  Destination buffer.
- * @param[in]  len  Maximum number of bytes to read.
+ * @param[in] ctx  Internal fd-pair context.
  *
- * @return Bytes read, or @c -1 on error.
+ * @return 1 if a byte can be read, 0 if not, or @c -1 on error.
  */
 static cli_transport_ret_t cli_fd_transport_available(void *ctx) {
   const cli_fd_ctx_struct_t *fds = (const cli_fd_ctx_struct_t *)ctx;
   return fd_available_raw(fds->read_fd);
 }
 
+/**
+ * @brief Transport read callback for the POSIX fd transport.
+ *
+ * @param[in] ctx  Internal fd-pair context.
+ *
+ * @return Byte value 0..255, or @c -1 on error / end of file.
+ */
 static cli_transport_ret_t cli_fd_transport_read(void *ctx) {
   const cli_fd_ctx_struct_t *fds = (const cli_fd_ctx_struct_t *)ctx;
   return fd_read_raw(fds->read_fd);

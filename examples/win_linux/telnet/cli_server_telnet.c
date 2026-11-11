@@ -97,20 +97,24 @@ int main(int argc, char *argv[]) {
   uint16_t port = TELNET_SERVER_DEFAULT_PORT;
   int result = 0;
 
+  int32_t listen_fd = CLI_TELNET_INVALID_SOCKET;
+
   if (argc > 1 && (!parse_u16(argv[1], &port) || port == 0U)) {
     /* 0 would bind a random ephemeral port; anything else invalid must not be guessed at. */
     fprintf(stderr, "Invalid port '%s' (expected 1..65535)\n", argv[1]);
-    return 1;
+    result = 1;
+  } else {
+#if !ENV_IS_WINDOWS
+    /* A client that disconnects while output is being sent must end its session (EPIPE),
+     * not kill the server. */
+    signal(SIGPIPE, SIG_IGN);
+#endif
+    listen_fd = cli_telnet_listen(port);
   }
 
-#if !ENV_IS_WINDOWS
-  /* A client that disconnects while output is being sent must end its session (EPIPE),
-   * not kill the server. */
-  signal(SIGPIPE, SIG_IGN);
-#endif
-
-  int32_t listen_fd = cli_telnet_listen(port);
-  if (listen_fd < 0) {
+  if (result != 0) {
+    /* Invalid arguments: reported above. */
+  } else if (listen_fd < 0) {
     fprintf(stderr, "Failed to listen on port %u\n", port);
     result = 1;
   } else {

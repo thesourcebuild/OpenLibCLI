@@ -87,63 +87,65 @@ static int8_t cli_server_loop(cli_struct_t *cli);
  */
 int main(int argc, char *argv[]) {
   uint16_t port = TCP_SERVER_DEFAULT_PORT;
+  int32_t listen_fd = CLI_TCP_ERR;
+  int result = 0;
 
   if (argc > 1 && (!parse_u16(argv[1], &port) || port == 0U)) {
     /* 0 would bind a random ephemeral port; anything else invalid must not be guessed at. */
     fprintf(stderr, "Invalid port '%s' (expected 1..65535)\n", argv[1]);
-    return 1;
-  }
-
+    result = 1;
+  } else {
 #if !ENV_IS_WINDOWS
-  /* A client that disconnects while output is being sent must end its session (EPIPE),
-   * not kill the server. */
-  signal(SIGPIPE, SIG_IGN);
+    /* A client that disconnects while output is being sent must end its session (EPIPE),
+     * not kill the server. */
+    signal(SIGPIPE, SIG_IGN);
 #endif
+    listen_fd = cli_tcp_listen(port);
+  }
 
-  int32_t listen_fd = cli_tcp_listen(port);
-  if (listen_fd < 0) {
+  if (result != 0) {
+    /* Invalid arguments: reported above. */
+  } else if (listen_fd < 0) {
     fprintf(stderr, "Failed to listen on TCP port %u\n", port);
-    return 1;
-  }
+    result = 1;
+  } else {
+    printf("OpenLibCLI TCP CLI server listening on port %u\n", port);
+    printf("Mode: raw TCP\n");
+    printf("Connect with: PuTTY (Raw mode)\n");
+    printf("PuTTY setting required:\n");
+    printf("  Option A: PuTTY > Terminal > Local echo = Force off, Local line editing = Force "
+           "off\n");
+    printf("  Option B: Use Telnet mode instead (PuTTY protocol = Telnet, port %u)\n", port);
+    printf("            Run the Telnet server (cli_server_telnet.exe)\n\n");
 
-  printf("OpenLibCLI TCP CLI server listening on port %u\n", port);
-  printf("Mode: raw TCP\n");
-  printf("Connect with: PuTTY (Raw mode)\n");
-  printf("PuTTY setting required:\n");
-  printf("  Option A: PuTTY > Terminal > Local echo = Force off, Local line editing = Force "
-         "off\n");
+    uint32_t session_num = 0;
 
-  printf("Alternative: Use Telnet mode instead (PuTTY protocol = Telnet, port %u)\n\n", port);
+    while (true) {
+      int32_t client_fd = cli_tcp_accept(listen_fd);
+      if (client_fd < 0) {
+        fprintf(stderr, "accept() failed\n");
+        cli_sleep_ms(100U); /* back off: persistent errors (e.g. EMFILE) would spin */
+      } else {
+        printf("TCP client connected (session %u)\n", ++session_num);
 
-  printf("  Option B: Use Telnet mode instead (PuTTY protocol = Telnet, port %u)\n", port);
-  printf("            Run the Telnet server (cli_server_telnet.exe)\n\n");
+        cli_tcp_ctx_struct_t tcp_ctx;
+        cli_transport_struct_t transport;
+        cli_tcp_init(&tcp_ctx, &transport, client_fd, (TCP_RAW_AUTO_NEWLINE != 0));
 
-  uint32_t session_num = 0;
+        cli_init(&demo_cli, "router", &transport, NULL, demo_cmd_pool, CLI_MAX_COMMANDS);
+        demo_register_commands(&demo_cli);
 
-  while (1) {
-    int32_t client_fd = cli_tcp_accept(listen_fd);
-    if (client_fd < 0) {
-      fprintf(stderr, "accept() failed\n");
-      cli_sleep_ms(100U); /* back off: persistent errors (e.g. EMFILE) would spin */
-      continue;
+        configure_session(&demo_cli, session_num);
+        int8_t rc = cli_server_loop(&demo_cli);
+        printf("TCP session %u ended (rc=%d)\n", session_num, rc);
+
+        cli_done(&demo_cli);
+        cli_tcp_close(client_fd);
+      }
     }
-
-    printf("TCP client connected (session %d)\n", ++session_num);
-
-    cli_tcp_ctx_struct_t tcp_ctx;
-    cli_transport_struct_t transport;
-    cli_tcp_init(&tcp_ctx, &transport, client_fd, (TCP_RAW_AUTO_NEWLINE != 0));
-
-    cli_init(&demo_cli, "router", &transport, NULL, demo_cmd_pool, CLI_MAX_COMMANDS);
-    demo_register_commands(&demo_cli);
-
-    configure_session(&demo_cli, session_num);
-    int8_t rc = cli_server_loop(&demo_cli);
-    printf("TCP session %d ended (rc=%d)\n", session_num, rc);
-
-    cli_done(&demo_cli);
-    cli_tcp_close(client_fd);
   }
+
+  return result;
 }
 
 /*=======================================================================================

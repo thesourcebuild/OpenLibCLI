@@ -368,19 +368,21 @@ static cli_transport_ret_t cli_unix_socket_transport_write(void *raw, const uint
                                                            cli_transport_buflen_t len) {
   cli_unix_socket_ctx_struct_t *ctx = (cli_unix_socket_ctx_struct_t *)raw;
   size_t sent = 0;
+  cli_transport_ret_t result = (cli_transport_ret_t)len;
 
-  while (sent < (size_t)len) {
+  while (sent < (size_t)len && result >= 0) {
     ssize_t n = send(ctx->fd, &buf[sent], (size_t)len - sent, UNIX_SEND_FLAGS);
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return CLI_UNIX_SOCK_ERR;
+    if (n > 0) {
+      sent += (size_t)n;
+    } else if (n < 0 && errno == EINTR) {
+      /* Interrupted by a signal: send the rest again. */
+    } else {
+      /* An error, or no progress at all (which would otherwise repeat forever). */
+      result = CLI_UNIX_SOCK_ERR;
     }
-    sent += (size_t)n;
   }
 
-  return (cli_transport_ret_t)len;
+  return result;
 }
 #endif
 

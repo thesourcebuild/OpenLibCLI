@@ -166,12 +166,12 @@ int32_t cli_tcp_listen(uint16_t port) {
   int32_t result = CLI_TCP_ERR;
 
 #if ENV_IS_WINDOWS
-  if (cli_winsock_init() != CLI_TCP_OK) {
-    return CLI_TCP_ERR;
-  }
+  bool init_ok = (cli_winsock_init() == CLI_TCP_OK);
+#else
+  bool init_ok = true;
 #endif
 
-  cli_sock_t sock = socket(AF_INET, SOCK_STREAM, 0);
+  cli_sock_t sock = init_ok ? socket(AF_INET, SOCK_STREAM, 0) : CLI_TCP_INVALID_SOCKET;
   if (sock != CLI_TCP_INVALID_SOCKET) {
 #if ENV_IS_WINDOWS
     /* On Windows SO_REUSEADDR would let another process bind the same port and steal
@@ -355,19 +355,20 @@ static int32_t cli_tcp_wait_readable(cli_sock_t socket_fd, uint32_t timeout_ms) 
 static cli_transport_ret_t cli_tcp_send_all(cli_sock_t socket_fd, const uint8_t *buf,
                                             cli_transport_buflen_t len) {
   cli_transport_buflen_t sent = 0;
+  cli_transport_ret_t result = (cli_transport_ret_t)len;
 
-  while (sent < len) {
+  while (sent < len && result >= 0) {
     int32_t rc = (int32_t)CLI_TCP_SEND(socket_fd, buf + sent, len - sent);
-    if (rc < 0 && cli_tcp_is_interrupted()) {
-      continue;
+    if (rc > 0) {
+      sent += (cli_transport_buflen_t)rc;
+    } else if (rc < 0 && cli_tcp_is_interrupted()) {
+      /* Interrupted by a signal: send the rest again. */
+    } else {
+      result = CLI_TCP_TRANSPORT_READ_ERR;
     }
-    if (rc <= 0) {
-      return CLI_TCP_TRANSPORT_READ_ERR;
-    }
-    sent += (cli_transport_buflen_t)rc;
   }
 
-  return (cli_transport_ret_t)len;
+  return result;
 }
 
 /**

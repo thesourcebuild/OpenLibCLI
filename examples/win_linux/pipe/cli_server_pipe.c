@@ -456,7 +456,7 @@ static int run_named_server(const char *name) {
 #endif
       listening = false;
     } else {
-      printf("Client connected (session %d)\n", ++session_num);
+      printf("Client connected (session %u)\n", ++session_num);
 
       cli_pipe_init(&pipe_ctx, &transport);
       cli_init(&demo_cli, "pipe-router", &transport, NULL, demo_cmd_pool, CLI_MAX_COMMANDS);
@@ -465,7 +465,7 @@ static int run_named_server(const char *name) {
       /* One client at a time: an idle connection is closed so the next client can get in. */
       cli_set_idle_timeout_mode(&demo_cli, CLI_IDLE_TIMEOUT_POLICY_CLOSE);
       int8_t rc = cli_server_loop(&demo_cli);
-      printf("Session %d ended (rc=%d)\n", session_num, rc);
+      printf("Session %u ended (rc=%d)\n", session_num, rc);
 
       cli_done(&demo_cli);
       cli_named_pipe_disconnect(&pipe_ctx);
@@ -565,6 +565,8 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
       char c = rec.Event.KeyEvent.uChar.AsciiChar;
       const char *seq = NULL;
       DWORD seq_len = 0;
+      /* A key held down may arrive as one event that stands for several presses. */
+      WORD repeat = (rec.Event.KeyEvent.wRepeatCount > 0U) ? rec.Event.KeyEvent.wRepeatCount : 1U;
 
       if (c == '\0') {
         switch (rec.Event.KeyEvent.wVirtualKeyCode) {
@@ -599,17 +601,14 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
         default:
           break;
         }
-
-        if (seq) {
-          DWORD written = 0;
-          if (!WriteFile(h_write, seq, seq_len, &written, NULL)) {
-            fprintf(stderr, "[client] WriteFile error %lu\n", GetLastError());
-            running = 0;
-          }
-        }
       } else {
+        seq = &c;
+        seq_len = 1;
+      }
+
+      for (WORD i = 0U; seq != NULL && running && i < repeat; i++) {
         DWORD written = 0;
-        if (!WriteFile(h_write, &c, 1, &written, NULL)) {
+        if (!WriteFile(h_write, seq, seq_len, &written, NULL)) {
           fprintf(stderr, "[client] WriteFile error %lu\n", GetLastError());
           running = 0;
         }
