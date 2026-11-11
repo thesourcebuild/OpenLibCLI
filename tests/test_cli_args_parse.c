@@ -931,6 +931,32 @@ static void test_format_bytes(void) {
   TEST_END();
 }
 
+static void test_format_null(void) {
+  const uint8_t data[2] = {0x12U, 0x34U};
+  char buf[8] = "xyz";
+
+  TEST_START("format_null");
+  /* No buffer: nothing is written, 0 is returned (a size alone does not make it valid). */
+  ASSERT_EQ(format_u64(NULL, 8, 5ULL), 0);
+  ASSERT_EQ(format_i64(NULL, 8, -5LL), 0);
+  ASSERT_EQ(format_hex64(NULL, 8, 5ULL), 0);
+  ASSERT_EQ(format_u32(NULL, 8, 5U), 0);
+  ASSERT_EQ(format_i32(NULL, 8, -5), 0);
+  ASSERT_EQ(format_hex32(NULL, 8, 5U), 0);
+  ASSERT_EQ(format_u16(NULL, 8, 5U), 0);
+  ASSERT_EQ(format_i16(NULL, 8, -5), 0);
+  ASSERT_EQ(format_hex16(NULL, 8, 5U), 0);
+  ASSERT_EQ(format_u8(NULL, 8, 5U), 0);
+  ASSERT_EQ(format_i8(NULL, 8, -5), 0);
+  ASSERT_EQ(format_hex8(NULL, 8, 5U), 0);
+  ASSERT_EQ(format_bytes(NULL, 8, data, 2), 0);
+
+  /* No data for a non-zero length: an empty string, nothing is read. */
+  ASSERT_EQ(format_bytes(buf, sizeof(buf), NULL, 2), 0);
+  ASSERT_STR_EQ(buf, "");
+  TEST_END();
+}
+
 /*=======================================================================================
  * Main
  *=======================================================================================*/
@@ -983,6 +1009,7 @@ int main(void) {
   RUN_SUITE(test_format_i8);
   RUN_SUITE(test_format_hex8);
   RUN_SUITE(test_format_bytes);
+  RUN_SUITE(test_format_null);
 
   /* Summary */
   printf("\n=== Results: %d tests, %d asserts, %d failures ===\n", s_tests_run, s_asserts,

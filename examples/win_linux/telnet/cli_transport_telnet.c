@@ -626,7 +626,13 @@ static bool cli_telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, 
     if (byte == TELNET_SE) {
       ctx->state = TELNET_STATE_NORMAL;
     } else if (byte == TELNET_IAC) {
-      ctx->state = TELNET_STATE_SB; /* escaped 0xFF inside the payload */
+      /* An escaped 0xFF is one payload byte: it counts towards the limit like any other, so
+       * a block of escaped bytes cannot hold back the input that follows it either. */
+      if (++ctx->sb_len > CLI_TELNET_MAX_SB_LEN) {
+        ctx->state = TELNET_STATE_NORMAL;
+      } else {
+        ctx->state = TELNET_STATE_SB;
+      }
     } else {
       /* IAC <command> inside SB: the block was never terminated; resume normal parsing. */
       ctx->state = TELNET_STATE_IAC;
