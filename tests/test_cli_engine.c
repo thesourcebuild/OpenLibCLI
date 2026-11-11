@@ -118,19 +118,21 @@ static bool s_write_fails;
 static cli_transport_buflen_t s_write_chunk; /* 0 = accept everything; else max per call */
 
 static cli_transport_ret_t t_write(void *ctx, const uint8_t *buf, cli_transport_buflen_t len) {
+  cli_transport_ret_t rc = -1; /* write failure requested by the test */
+
   (void)ctx;
-  if (s_write_fails) {
-    return -1;
+  if (!s_write_fails) {
+    if (s_write_chunk > 0 && len > s_write_chunk) {
+      len = s_write_chunk; /* short write: the engine must send the rest itself */
+    }
+    if (s_out_len + (size_t)len < sizeof(s_out)) {
+      memcpy(&s_out[s_out_len], buf, (size_t)len);
+      s_out_len += (size_t)len;
+      s_out[s_out_len] = '\0';
+    }
+    rc = (cli_transport_ret_t)len;
   }
-  if (s_write_chunk > 0 && len > s_write_chunk) {
-    len = s_write_chunk; /* short write: the engine must send the rest itself */
-  }
-  if (s_out_len + (size_t)len < sizeof(s_out)) {
-    memcpy(&s_out[s_out_len], buf, (size_t)len);
-    s_out_len += (size_t)len;
-    s_out[s_out_len] = '\0';
-  }
-  return (cli_transport_ret_t)len;
+  return rc;
 }
 
 static uint32_t t_now(void *ctx) {
