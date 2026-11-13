@@ -278,6 +278,21 @@ static int8_t cmd_longline(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
   return CLI_OK;
 }
 
+static int8_t cmd_wideline(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                           const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  /* One line longer than the line buffer (HEAD ... TAIL), then a short line. */
+  cli_print(cli, "HEAD");
+  for (int left = CLI_MAX_OUTPUT_BUF + 50; left > 0; left -= 10) {
+    cli_print(cli, "%.*s", (left < 10) ? left : 10, "yyyyyyyyyy");
+  }
+  cli_println(cli, "TAIL");
+  cli_println(cli, "short");
+  return CLI_OK;
+}
+
 static int8_t cmd_warn(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
   (void)cmd;
   (void)argc;
@@ -337,6 +352,8 @@ static void register_test_commands(void) {
   (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "nestpipe", cmd_nestpipe, CLI_PRIV_USER,
                         CLI_MODE_ANY, "");
   (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "longline", cmd_longline, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "wideline", cmd_wideline, CLI_PRIV_USER,
                         CLI_MODE_ANY, "");
   (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "warn", cmd_warn, CLI_PRIV_USER, CLI_MODE_ANY, "");
   (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "relogin", cmd_relogin, CLI_PRIV_USER, CLI_MODE_ANY,
@@ -529,6 +546,61 @@ static void test_user_mode_submenus(void) {
   TEST_END();
 }
 
+static int8_t cmd_grant_submenu(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                                const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  cli_set_privilege(cli, CLI_PRIV_PRIVILEGED);
+  return CLI_OK;
+}
+
+static int8_t cmd_grant_mode_submenu(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                                     const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  cli_set_privilege(cli, CLI_PRIV_PRIVILEGED);
+  return cli_set_mode(cli, CLI_MODE_USER_BASE + 5);
+}
+
+static void test_submenu_privilege_ends_on_exit(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("submenu_privilege_ends_on_exit");
+  session_new();
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "lab", cmd_grant_submenu, CLI_PRIV_USER,
+                      CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, h, "probe", cmd_name, CLI_PRIV_PRIVILEGED, CLI_MODE_ANY, "");
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "rack", cmd_grant_mode_submenu, CLI_PRIV_USER,
+                      CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, h, "probe", cmd_name, CLI_PRIV_PRIVILEGED,
+                        CLI_MODE_USER_BASE + 5, "");
+  session_start();
+
+  /* The privilege a submenu command grants lasts while the submenu is open. */
+  type("lab\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  type("exit\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+
+  /* Also when the command switches mode after raising the privilege. */
+  type("rack\r");
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_USER_BASE + 5);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  type("exit\r");
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_EXEC);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+
+  /* 'enable' is not a submenu: its privilege stays. */
+  type("enable\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  type("lab\r");
+  type("exit\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  TEST_END();
+}
+
 static void test_navigation_depth_limit(void) {
   TEST_START("navigation_depth_limit");
   session_new();
@@ -685,6 +757,15 @@ static void test_csi_with_parameters(void) {
   /* Ctrl+Left moves the cursor like Left. */
   out_clear();
   type("hep\x1b[1;5Dl\r");
+  ASSERT_OUT("  exit");
+
+  /* Linux console F1 (ESC [ [ A) and Shift+F1 as SS3 with a modifier (ESC O 2 P) insert
+   * nothing; a modified SS3 arrow (ESC O 5 D) moves the cursor like Left. */
+  out_clear();
+  type("hel\x1b[[Ap\x1bO2P\r");
+  ASSERT_OUT("  exit");
+  out_clear();
+  type("hep\x1bO5Dl\r");
   ASSERT_OUT("  exit");
   TEST_END();
 }
@@ -1090,6 +1171,30 @@ static int8_t idle_cb(cli_struct_t *cli) {
   (void)cli;
   s_idle_calls++;
   return CLI_OK;
+}
+
+static void test_idle_check_only_while_running(void) {
+  TEST_START("idle_check_only_while_running");
+  session_new();
+  s_idle_calls = 0;
+
+  /* Not started: the callback is not run. */
+  cli_set_idle_timeout_cb(&s_cli, 5U, idle_cb);
+  s_now += 100U;
+  ASSERT_EQ(cli_check_idle_timeout(&s_cli), CLI_OK);
+  ASSERT_EQ(s_idle_calls, 0);
+
+  /* Closed by the timeout: checking the stopped session again does nothing. */
+  cli_set_idle_timeout_cb(&s_cli, 5U, NULL);
+  cli_set_idle_timeout_mode(&s_cli, CLI_IDLE_TIMEOUT_POLICY_CLOSE);
+  session_start();
+  s_now += 6U;
+  ASSERT_EQ(run(), CLI_ERR_QUIT);
+  ASSERT_EQ(out_count("Idle timeout"), 1);
+  s_now += 6U;
+  ASSERT_EQ(cli_check_idle_timeout(&s_cli), CLI_OK);
+  ASSERT_EQ(out_count("Idle timeout"), 1);
+  TEST_END();
 }
 #endif
 
@@ -3406,6 +3511,22 @@ static void test_begin_and_count_filters(void) {
   out_clear();
   type("usage keys | include Ctrl-K \t \r"); /* trailing blanks are not part of the pattern */
   ASSERT_OUT("Ctrl-K   delete to EOL");
+
+  /* A line longer than the line buffer reaches the filter in pieces: it is still one line,
+   * and a match in its first piece decides the rest of it. */
+  out_clear();
+  type("wideline | count\r");
+  ASSERT_OUT("Count: 2");
+  out_clear();
+  type("wideline | include HEAD\r");
+  ASSERT_OUT("HEADyyy");
+  ASSERT_OUT("yyyTAIL");
+  ASSERT_NOT_OUT("short");
+  out_clear();
+  type("wideline | exclude HEAD\r");
+  ASSERT_NOT_OUT("HEADyyy");
+  ASSERT_NOT_OUT("yyyTAIL");
+  ASSERT_OUT("short");
   TEST_END();
 }
 #endif
@@ -3962,6 +4083,7 @@ int main(void) {
   RUN_SUITE(test_exit_unwinds_modes);
   RUN_SUITE(test_end_and_disable);
   RUN_SUITE(test_user_mode_submenus);
+  RUN_SUITE(test_submenu_privilege_ends_on_exit);
   RUN_SUITE(test_navigation_depth_limit);
 #if CLI_ENABLE_MODE_NAMES
   RUN_SUITE(test_mode_name_for_user_mode);
@@ -4023,6 +4145,7 @@ int main(void) {
 #endif
 #if CLI_ENABLE_IDLE_TIMEOUT
   RUN_SUITE(test_idle_reset_fires_once);
+  RUN_SUITE(test_idle_check_only_while_running);
 #endif
 
   printf("\n--- round 2 ---\n");
