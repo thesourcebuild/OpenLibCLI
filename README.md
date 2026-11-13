@@ -754,7 +754,7 @@ No special setup needed. GCC and Clang both work out of the box.
 
 Contributions of all sizes are warmly welcome!. Please feel free to:
 
-- Report issues using [the issue guide](Docs/create_a_issue.md)
+- Report issues using [the issue guide](Docs/Create_a_Issue.md)
 - Submit pull requests
 - Improve documentation
 - Suggest new features

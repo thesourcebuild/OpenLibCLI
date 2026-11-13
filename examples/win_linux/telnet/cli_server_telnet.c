@@ -121,6 +121,9 @@ int main(int argc, char *argv[]) {
 
     printf("OpenLibCLI CLI server listening on port %u\n", port);
     printf("Connect with:  telnet localhost %u\n\n", port);
+    /* Status lines are shown at once, also when stdout is redirected (fully buffered then)
+     * and the server is stopped by a signal. */
+    fflush(stdout);
 
     uint32_t session_num = 0;
 
@@ -132,6 +135,7 @@ int main(int argc, char *argv[]) {
       } else {
 
         printf("Client connected (session %u)\n", ++session_num);
+        fflush(stdout);
 
         static cli_telnet_ctx_struct_t telnet_ctx;
         static cli_transport_struct_t transport;
@@ -171,6 +175,7 @@ int main(int argc, char *argv[]) {
 #else
         printf("Session %u ended (rc=%d)\n", session_num, rc);
 #endif
+        fflush(stdout);
 
         cli_done(&demo_cli);
         cli_telnet_close(client_fd);

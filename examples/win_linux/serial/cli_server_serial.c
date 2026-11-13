@@ -122,6 +122,10 @@ int main(void) {
   printf("Starting Serial CLI server (stdin/stdout)\n");
   printf("Connect with: (Interactive terminal)\n");
   printf("Type 'exit' to quit.\n\n");
+  /* Out before the session starts: the CLI writes to the same stdout directly
+   * (unbuffered), and buffered lines would otherwise follow the whole session when stdout
+   * is redirected. */
+  fflush(stdout);
 
 #if CLI_ENABLE_TIMMING_STATS
   cli_platform_struct_t platform = {0};
@@ -159,6 +163,7 @@ int main(void) {
 
   int8_t rc = cli_server_loop(&demo_cli);
   printf("Session ended (rc=%d)\n", rc);
+  fflush(stdout);
 
 #if ENV_IS_UNIX_LIKE
   platform_restore_term();

@@ -26,7 +26,7 @@ else()
     set(CLI_PLATFORM "linux")
 endif()
 
-set(CLI_OUT_DIR "${CMAKE_BINARY_DIR}/${CLI_PLATFORM}")
+set(CLI_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/${CLI_PLATFORM}")
 set(CLI_BIN_DIR "${CLI_OUT_DIR}/binaries")
 set(CLI_LIB_DIR "${CLI_OUT_DIR}/libs")
 
@@ -51,13 +51,13 @@ endforeach()
 find_package(Python3 QUIET)
 if(Python3_FOUND)
     add_custom_command(
-        OUTPUT ${CMAKE_SOURCE_DIR}/cli/cli_version.h
-        COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/scripts/gen_version_header.py
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        MAIN_DEPENDENCY ${CMAKE_SOURCE_DIR}/version
+        OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/cli/cli_version.h
+        COMMAND "${Python3_EXECUTABLE}" ${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_version_header.py
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        MAIN_DEPENDENCY ${CMAKE_CURRENT_SOURCE_DIR}/version
         COMMENT "Generating cli/cli_version.h"
     )
-    add_custom_target(gen_version ALL DEPENDS ${CMAKE_SOURCE_DIR}/cli/cli_version.h)
+    add_custom_target(gen_version ALL DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cli/cli_version.h)
 else()
     message(STATUS "Python3 not found — using existing cli/cli_version.h")
 endif()
@@ -175,7 +175,7 @@ if(CLI_HAS_SHARED)
     set_target_properties(cli_shared PROPERTIES OUTPUT_NAME OpenLibCLI EXPORT_NAME OpenLibCLI)
     # The shared library's path as built (its name differs per toolchain, its directory per
     # configuration), for build scripts that copy it: they never have to guess the file name.
-    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/openlibcli_shared_$<CONFIG>.txt"
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/openlibcli_shared_$<CONFIG>.txt"
          CONTENT "$<TARGET_FILE:cli_shared>")
     if(TARGET gen_version)
         add_dependencies(cli_shared gen_version)
@@ -336,7 +336,7 @@ endif()
 include(CMakePackageConfigHelpers)
 
 # Read the version from the plain-text 'version' file
-file(READ "${CMAKE_SOURCE_DIR}/version" _RAW_VERSION)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/version" _RAW_VERSION)
 string(STRIP "${_RAW_VERSION}" PROJECT_VERSION)
 
 # --- Targets ---
@@ -374,7 +374,7 @@ write_basic_package_version_file(
 # package name, so find_package(OpenLibCLI) and find_package(openlibcli) both work on
 # case-sensitive file systems.
 configure_package_config_file(
-    "${CMAKE_SOURCE_DIR}/cmake/openlibcliConfig.cmake.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/openlibcliConfig.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/openlibcli-config.cmake"
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/OpenLibCLI)
 

@@ -117,6 +117,9 @@ int main(int argc, char *argv[]) {
            "off\n");
     printf("  Option B: Use Telnet mode instead (PuTTY protocol = Telnet, port %u)\n", port);
     printf("            Run the Telnet server (cli_server_telnet.exe)\n\n");
+    /* Status lines are shown at once, also when stdout is redirected (fully buffered then)
+     * and the server is stopped by a signal. */
+    fflush(stdout);
 
     uint32_t session_num = 0;
 
@@ -127,6 +130,7 @@ int main(int argc, char *argv[]) {
         cli_sleep_ms(100U); /* back off: persistent errors (e.g. EMFILE) would spin */
       } else {
         printf("TCP client connected (session %u)\n", ++session_num);
+        fflush(stdout);
 
         cli_tcp_ctx_struct_t tcp_ctx;
         cli_transport_struct_t transport;
@@ -138,6 +142,7 @@ int main(int argc, char *argv[]) {
         configure_session(&demo_cli, session_num);
         int8_t rc = cli_server_loop(&demo_cli);
         printf("TCP session %u ended (rc=%d)\n", session_num, rc);
+        fflush(stdout);
 
         cli_done(&demo_cli);
         cli_tcp_close(client_fd);

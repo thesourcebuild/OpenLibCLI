@@ -626,6 +626,62 @@ static void test_submenu_privilege_after_return(void) {
   TEST_END();
 }
 
+static cli_cmd_handle_t s_enclosing_menu;
+
+static int8_t cmd_ok(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
+  (void)cli;
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  return CLI_OK;
+}
+
+/* Run from another command: removes the submenu the session is in. */
+static int8_t cmd_remove_menu(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                              const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  return cli_remove_command(cli, s_enclosing_menu);
+}
+
+/* Submenu command: grants privilege for its submenu, then runs a helper command. */
+static int8_t cmd_grant_then_exec(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                                  const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  cli_set_privilege(cli, CLI_PRIV_PRIVILEGED);
+  return cli_exec(cli, "inner");
+}
+
+static void test_submenu_privilege_nested_removal(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("submenu_privilege_nested_removal");
+  session_new();
+  s_enclosing_menu = cli_add_command(&s_cli, CLI_CMD_ROOT, "sss", cmd_ok, CLI_PRIV_USER,
+                                     CLI_MODE_EXEC, "");
+  h = cli_add_command(&s_cli, s_enclosing_menu, "ttt", cmd_ok, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, h, "leaf", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "outer", cmd_grant_then_exec, CLI_PRIV_USER,
+                      CLI_MODE_EXEC, "");
+  (void)cli_add_command(&s_cli, h, "o1", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "inner", cmd_remove_menu, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  session_start();
+
+  /* The command run from 'outer' removes the submenus the session is in, while 'outer'
+   * is still running: the privilege 'outer' granted still ends with its submenu. */
+  type("sss\r");
+  type("ttt\r");
+  type("outer\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  type("exit\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  TEST_END();
+}
+
 static void test_submenu_privilege_ends_on_exit(void) {
   cli_cmd_handle_t h;
 
@@ -1127,6 +1183,65 @@ static void test_login_prompt_hides_history(void) {
   type("\x1b[A");
   ASSERT_NOT_OUT("show version");
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  TEST_END();
+}
+
+static int s_mode_exec_count;
+
+/* Mode-change callback that runs a command, e.g. to log the change. */
+static void mode_cb_runs_command(cli_struct_t *cli, cli_mode_t mode, cli_priv_t priv) {
+  (void)mode;
+  (void)priv;
+  s_mode_exec_count++;
+  (void)cli_exec(cli, "echo mode-changed");
+}
+
+static int8_t auth_cb_grants(cli_struct_t *cli, const char *user, const char *pass) {
+  int8_t ok = CLI_ERR_AUTH;
+  (void)user;
+  if (strcmp(pass, "S3cretPW") == 0) {
+    cli_set_privilege(cli, CLI_PRIV_PRIVILEGED);
+    ok = CLI_OK;
+  }
+  return ok;
+}
+
+static void test_login_secret_never_shown(void) {
+  TEST_START("login_secret_never_shown");
+
+  /* Authorization callback: the privilege it grants notifies the mode-change callback. */
+  session_new();
+  cli_set_authorization_cb(&s_cli, auth_cb_grants);
+  cli_require_authorization(&s_cli, true);
+  cli_set_mode_change_cb(&s_cli, mode_cb_runs_command);
+  session_start();
+  type("admin\r");
+  out_clear();
+  s_mode_exec_count = 0;
+  type("S3cretPW\r");
+  ASSERT_TRUE(s_mode_exec_count > 0);
+  ASSERT_OUT("ARGS [mode-changed]");
+  ASSERT_NOT_OUT("S3cret");
+  ASSERT_NOT_OUT("Password:");
+  ASSERT_EQ(out_count("rtr# "), 1);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+
+  /* Local user table: the same, and no stray prompts. */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "S3cretPW", CLI_PRIV_PRIVILEGED);
+  cli_require_authorization(&s_cli, true);
+  cli_set_mode_change_cb(&s_cli, mode_cb_runs_command);
+  session_start();
+  type("admin\r");
+  out_clear();
+  s_mode_exec_count = 0;
+  type("S3cretPW\r");
+  ASSERT_TRUE(s_mode_exec_count > 0);
+  ASSERT_NOT_OUT("S3cret");
+  ASSERT_NOT_OUT("Password:");
+  ASSERT_EQ(out_count("rtr# "), 1);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  cli_set_mode_change_cb(&s_cli, NULL);
   TEST_END();
 }
 
@@ -3887,8 +4002,9 @@ static void test_history_index_recall(void) {
   ASSERT_OUT("% Invalid history index.");
   ASSERT_STR_EQ(s_cli.input, "");
 
-  /* From cli_exec() outside any command: loaded when the editor is free, else dropped. */
-  ASSERT_EQ(cli_exec(&s_cli, "history 2"), CLI_EXEC_REPLAY_INPUT);
+  /* From cli_exec() outside any command: loaded when the editor is free, else dropped.
+   * Either way the request succeeded (CLI_EXEC_REPLAY_INPUT is internal). */
+  ASSERT_EQ(cli_exec(&s_cli, "history 2"), CLI_OK);
   ASSERT_STR_EQ(s_cli.input, "echo two");
   type("\x15" "abc");
   ASSERT_EQ(cli_exec(&s_cli, "history 2"), CLI_OK);
@@ -4247,6 +4363,7 @@ int main(void) {
   RUN_SUITE(test_user_mode_submenus);
   RUN_SUITE(test_submenu_privilege_ends_on_exit);
   RUN_SUITE(test_submenu_privilege_after_return);
+  RUN_SUITE(test_submenu_privilege_nested_removal);
   RUN_SUITE(test_navigation_depth_limit);
 #if CLI_ENABLE_MODE_NAMES
   RUN_SUITE(test_mode_name_for_user_mode);
@@ -4295,6 +4412,7 @@ int main(void) {
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_login_prompt_hides_history);
   RUN_SUITE(test_login_empty_username_reprompts);
+  RUN_SUITE(test_login_secret_never_shown);
 #endif
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_enable_attempt_limit);
