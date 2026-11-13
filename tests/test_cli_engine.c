@@ -564,6 +564,68 @@ static int8_t cmd_grant_mode_submenu(cli_struct_t *cli, const char *cmd, cli_arg
   return cli_set_mode(cli, CLI_MODE_USER_BASE + 5);
 }
 
+static int8_t cmd_mode5(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  return cli_set_mode(cli, CLI_MODE_USER_BASE + 5);
+}
+
+/* Returns to the enclosing mode, raises the privilege there and opens its submenu. */
+static int8_t cmd_up_grant(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                           const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  (void)cli_set_mode(cli, CLI_MODE_EXEC);
+  cli_set_privilege(cli, CLI_PRIV_PRIVILEGED);
+  return CLI_OK;
+}
+
+/* Returns to the enclosing mode, gives up the privilege there and opens a new mode. */
+static int8_t cmd_reroute(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                          const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  (void)cli_set_mode(cli, CLI_MODE_EXEC);
+  cli_set_privilege(cli, CLI_PRIV_USER);
+  return cli_set_mode(cli, CLI_MODE_USER_BASE + 6);
+}
+
+static void test_submenu_privilege_after_return(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("submenu_privilege_after_return");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "m5", cmd_mode5, CLI_PRIV_USER, CLI_MODE_EXEC, "");
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "upgrant", cmd_up_grant, CLI_PRIV_USER,
+                      CLI_MODE_USER_BASE + 5, "");
+  (void)cli_add_command(&s_cli, h, "y", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "reroute", cmd_reroute, CLI_PRIV_USER,
+                      CLI_MODE_USER_BASE + 5, "");
+  (void)cli_add_command(&s_cli, h, "x", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  session_start();
+
+  /* A grant made after returning to the enclosing mode ends with the submenu. */
+  type("m5\r");
+  type("upgrant\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  type("exit\r");
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_EXEC);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+
+  /* A privilege given up there does not come back when the submenu is left. */
+  type("m5\r");
+  cli_set_privilege(&s_cli, CLI_PRIV_PRIVILEGED);
+  type("reroute\r");
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_USER_BASE + 6);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  type("exit\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  TEST_END();
+}
+
 static void test_submenu_privilege_ends_on_exit(void) {
   cli_cmd_handle_t h;
 
@@ -1067,6 +1129,27 @@ static void test_login_prompt_hides_history(void) {
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
   TEST_END();
 }
+
+static void test_login_empty_username_reprompts(void) {
+  TEST_START("login_empty_username_reprompts");
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_PRIVILEGED);
+  cli_require_authorization(&s_cli, true);
+  session_start();
+
+  /* Enter alone at Username: asks again: no password prompt, no failed attempt. */
+  type("\r\n\r\n\r\n\r\n");
+  ASSERT_EQ(out_count("Username: "), 4);
+  ASSERT_NOT_OUT("Password:");
+  ASSERT_NOT_OUT("Authentication failed");
+  ASSERT_EQ(s_cli.auth_attempts, 0);
+
+  out_clear();
+  type("admin\r\npw\r\n");
+  ASSERT_OUT("rtr# ");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  TEST_END();
+}
 #endif
 
 #if CLI_ENABLE_AUTH
@@ -1397,6 +1480,85 @@ static void test_registration_rules(void) {
   ASSERT_EQ(cli_set_enable_secret(&s_cli, long_secret), CLI_ERR);
   ASSERT_STR_EQ(s_cli.enable_privilege_secret, "ok");
 #endif
+  TEST_END();
+}
+
+static void test_shadowed_root_keyword(void) {
+  cli_cmd_handle_t menu;
+
+  TEST_START("shadowed_root_keyword");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "debug", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "deploy", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY,
+                        "");
+  menu = cli_add_command(&s_cli, CLI_CMD_ROOT, "lab", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, menu, "item", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  /* A hidden submenu command (prints "ARGS") takes over the root keyword 'debug'. */
+  cli_hide_command(&s_cli,
+                   cli_add_command(&s_cli, menu, "debug", cmd_echo, CLI_PRIV_USER, CLI_MODE_ANY, ""));
+  session_start();
+  type("lab\r");
+
+  /* An abbreviation of the taken-over keyword reaches neither command: Enter, '?' and Tab
+   * agree. */
+  out_clear();
+  type("deb\r");
+  ASSERT_OUT("% Unknown command: deb");
+  ASSERT_NOT_OUT("RAN:");
+  ASSERT_NOT_OUT("ARGS");
+  out_clear();
+  type("deb?");
+  ASSERT_OUT("% Unknown command.");
+  type("\x15");
+
+  /* The full keyword selects the submenu's command. */
+  out_clear();
+  type("debug\r");
+  ASSERT_OUT("ARGS");
+  ASSERT_NOT_OUT("RAN:");
+
+  /* 'de' is not ambiguous: the only root command it can still reach is 'deploy'. */
+  out_clear();
+  type("de\r");
+  ASSERT_NOT_OUT("Ambiguous");
+  ASSERT_OUT("RAN:deploy");
+  out_clear();
+  type("de?");
+  ASSERT_OUT("deploy");
+  ASSERT_NOT_OUT("  debug");
+  type("\x15");
+  TEST_END();
+}
+
+static void test_help_offers_cr_only_when_runnable(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("help_offers_cr_only_when_runnable");
+  session_new();
+  /* A container whose only subcommand is hidden: Enter on it cannot run anything. */
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "maint", NULL, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  cli_hide_command(&s_cli,
+                   cli_add_command(&s_cli, h, "reboot", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, ""));
+  session_start();
+
+  type("maint ?");
+  ASSERT_OUT("% Incomplete command.");
+  ASSERT_NOT_OUT("<cr>");
+  type("\x15");
+  out_clear();
+  type("help maint\r");
+  ASSERT_OUT("% Incomplete command.");
+  ASSERT_NOT_OUT("<cr>");
+  out_clear();
+  type("maint\r");
+  ASSERT_OUT("% Incomplete command.");
+
+  /* A command that runs and has subcommands: both are offered. */
+  out_clear();
+  type("usage ?");
+  ASSERT_OUT("commands");
+  ASSERT_OUT("<cr>");
+  type("\x15");
   TEST_END();
 }
 
@@ -4084,6 +4246,7 @@ int main(void) {
   RUN_SUITE(test_end_and_disable);
   RUN_SUITE(test_user_mode_submenus);
   RUN_SUITE(test_submenu_privilege_ends_on_exit);
+  RUN_SUITE(test_submenu_privilege_after_return);
   RUN_SUITE(test_navigation_depth_limit);
 #if CLI_ENABLE_MODE_NAMES
   RUN_SUITE(test_mode_name_for_user_mode);
@@ -4131,6 +4294,7 @@ int main(void) {
 #endif
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_login_prompt_hides_history);
+  RUN_SUITE(test_login_empty_username_reprompts);
 #endif
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_enable_attempt_limit);
@@ -4156,6 +4320,8 @@ int main(void) {
   RUN_SUITE(test_short_writes);
   RUN_SUITE(test_registration_rules);
   RUN_SUITE(test_help_and_completion_ui);
+  RUN_SUITE(test_help_offers_cr_only_when_runnable);
+  RUN_SUITE(test_shadowed_root_keyword);
   RUN_SUITE(test_remove_relocates_descendants);
   RUN_SUITE(test_engine_rejects_bad_transport);
 
