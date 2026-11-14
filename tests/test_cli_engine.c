@@ -1223,10 +1223,10 @@ static void test_login_secret_never_shown(void) {
   ASSERT_OUT("ARGS [mode-changed]");
   ASSERT_NOT_OUT("S3cret");
   ASSERT_NOT_OUT("Password:");
-  ASSERT_EQ(out_count("rtr# "), 1);
+  ASSERT_EQ(out_count("rtr# "), 1); /* shown once, after the login line is done */
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
 
-  /* Local user table: the same, and no stray prompts. */
+  /* Local user table: the same. */
   session_new();
   (void)cli_add_user(&s_cli, "admin", "S3cretPW", CLI_PRIV_PRIVILEGED);
   cli_require_authorization(&s_cli, true);
@@ -1242,6 +1242,44 @@ static void test_login_secret_never_shown(void) {
   ASSERT_EQ(out_count("rtr# "), 1);
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
   cli_set_mode_change_cb(&s_cli, NULL);
+  TEST_END();
+}
+
+static void test_lockout_survives_new_session(void) {
+  TEST_START("lockout_survives_new_session");
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_PRIVILEGED);
+  cli_require_authorization(&s_cli, true);
+  cli_set_auth_failure_mode(&s_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
+  session_start();
+
+  type("admin\rx\radmin\rx\radmin\rx\r");
+  ASSERT_OUT("Lock-Out");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+
+  /* A new session on the same line (a reconnecting client, a reopened terminal) does not
+   * get a fresh round of guesses: it waits out the lockout. */
+  out_clear();
+  cli_start(&s_cli);
+  type("admin\rpw\r");
+  ASSERT_OUT("Lock-Out");
+  ASSERT_NOT_OUT("Username:");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+
+  /* The same for a restart (e.g. an 'exit' / 'quit' / idle reset policy). */
+  cli_restart_session(&s_cli);
+  type("admin\rpw\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+
+  /* Once it is over, the new session starts at its own login. */
+  out_clear();
+  s_now += 31U;
+  (void)run();
+  ASSERT_OUT("Username: ");
+  type("admin\rpw\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
   TEST_END();
 }
 
@@ -4413,6 +4451,7 @@ int main(void) {
   RUN_SUITE(test_login_prompt_hides_history);
   RUN_SUITE(test_login_empty_username_reprompts);
   RUN_SUITE(test_login_secret_never_shown);
+  RUN_SUITE(test_lockout_survives_new_session);
 #endif
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_enable_attempt_limit);
