@@ -1245,6 +1245,14 @@ static void test_login_secret_never_shown(void) {
   TEST_END();
 }
 
+#if CLI_ENABLE_TIME_SOURCE
+#if CLI_ENABLE_PERIODIC_CALLBACK
+static int8_t periodic_requests_auth(cli_struct_t *cli) {
+  cli_request_auth(cli);
+  return CLI_OK;
+}
+#endif
+
 static void test_lockout_survives_new_session(void) {
   TEST_START("lockout_survives_new_session");
   session_new();
@@ -1273,6 +1281,12 @@ static void test_lockout_survives_new_session(void) {
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
   ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
 
+  /* Nor does a request for a new login (cli_request_auth()). */
+  cli_request_auth(&s_cli);
+  type("admin\rpw\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+
   /* Once it is over, the new session starts at its own login. */
   out_clear();
   s_now += 31U;
@@ -1280,8 +1294,32 @@ static void test_lockout_survives_new_session(void) {
   ASSERT_OUT("Username: ");
   type("admin\rpw\r");
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+
+#if CLI_ENABLE_PERIODIC_CALLBACK
+  /* An enable lockout: a request for a new login from a periodic callback during it drops
+   * the user, and the lockout still runs to its end before the login. */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  ASSERT_EQ(cli_set_enable_secret(&s_cli, "s3"), CLI_OK);
+  cli_require_authorization(&s_cli, true);
+  cli_set_auth_failure_mode(&s_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
+  session_start();
+  type("admin\rpw\renable\rx\renable\rx\renable\rx\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  cli_set_periodic_cb(&s_cli, periodic_requests_auth);
+  s_now += 2U;
+  (void)run();
+  cli_set_periodic_cb(&s_cli, NULL);
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  out_clear();
+  s_now += 31U;
+  (void)run();
+  ASSERT_OUT("Username: ");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+#endif
   TEST_END();
 }
+#endif
 
 static void test_login_empty_username_reprompts(void) {
   TEST_START("login_empty_username_reprompts");
@@ -2825,6 +2863,71 @@ static void test_credential_callback_restart(void) {
   ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
   ASSERT_EQ(out_count("Username: "), 1);
   ASSERT_NOT_OUT("rtr> ");
+  TEST_END();
+}
+
+static void mode_cb_restarts_on_enable(cli_struct_t *cli, cli_mode_t mode, cli_priv_t priv) {
+  (void)priv;
+  if (mode == CLI_MODE_ENABLE) {
+    cli_restart_session(cli);
+  }
+}
+
+static void mode_cb_relogin_on_enable(cli_struct_t *cli, cli_mode_t mode, cli_priv_t priv) {
+  (void)priv;
+  if (mode == CLI_MODE_ENABLE) {
+    cli_request_auth(cli);
+  }
+}
+
+static void test_callback_replaces_session(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("callback_replaces_session");
+
+  /* 'enable' whose mode-change callback restarts the session: the privilege belonged to
+   * the old session, the new one starts unprivileged. */
+  session_new();
+  ASSERT_EQ(cli_set_enable_secret(&s_cli, "s3"), CLI_OK);
+  cli_set_mode_change_cb(&s_cli, mode_cb_restarts_on_enable);
+  session_start();
+  type("enable\rs3\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_EXEC);
+  ASSERT_NOT_OUT("rtr# ");
+
+  /* The same without a secret. */
+  session_new();
+  cli_set_mode_change_cb(&s_cli, mode_cb_restarts_on_enable);
+  session_start();
+  type("enable\r");
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_EXEC);
+  ASSERT_NOT_OUT("rtr# ");
+
+  /* A callback that asks for a new login instead: the login starts unprivileged. */
+  session_new();
+  ASSERT_EQ(cli_set_enable_secret(&s_cli, "s3"), CLI_OK);
+  cli_set_mode_change_cb(&s_cli, mode_cb_relogin_on_enable);
+  session_start();
+  type("enable\rs3\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+
+  /* A submenu command that asks for a new login does not enter its submenu. */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "lockmenu", cmd_lock, CLI_PRIV_USER, CLI_MODE_ANY,
+                      "");
+  (void)cli_add_command(&s_cli, h, "leaf", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  session_start();
+  type("admin\rpw\r");
+  out_clear();
+  type("lockmenu\r");
+  ASSERT_OUT("Session locked.\r\nUsername: ");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  ASSERT_EQ(s_cli.nav_depth, 0);
   TEST_END();
 }
 #endif
@@ -4451,7 +4554,9 @@ int main(void) {
   RUN_SUITE(test_login_prompt_hides_history);
   RUN_SUITE(test_login_empty_username_reprompts);
   RUN_SUITE(test_login_secret_never_shown);
+#if CLI_ENABLE_TIME_SOURCE
   RUN_SUITE(test_lockout_survives_new_session);
+#endif
 #endif
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_enable_attempt_limit);
@@ -4542,6 +4647,7 @@ int main(void) {
   RUN_SUITE(test_enable_keeps_higher_privilege);
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_credential_callback_restart);
+  RUN_SUITE(test_callback_replaces_session);
 #endif
   RUN_SUITE(test_async_partial_line_kept_apart);
 #if CLI_ENABLE_HISTORY
