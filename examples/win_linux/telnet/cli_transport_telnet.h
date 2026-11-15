@@ -27,6 +27,7 @@
  *   cli_cmd_struct_t   cmd_pool[CLI_MAX_COMMANDS];
  *
  *   cli_init(&cli, "host", &transport, NULL, cmd_pool, CLI_MAX_COMMANDS);
+ *   cli_telnet_set_session(&ctx, &cli);
  *   cli_add_builtin_cmds(&cli);
  *
  *   cli_start(&cli);
@@ -104,6 +105,10 @@ typedef struct {
   uint8_t state;                 /**< IAC parser state. */
   uint8_t verb;                  /**< IAC verb byte being processed. */
   uint16_t sb_len;               /**< Bytes consumed in the current sub-negotiation. */
+  uint8_t sb_buf[5];             /**< Start of the current sub-negotiation: option and the
+                                      window size of NAWS (width, height; 16 bits each). */
+  uint16_t window_width;         /**< Client window width (NAWS), 0 until reported. */
+  cli_struct_t *cli;             /**< Session told about window size changes, or NULL. */
   bool negotiated;               /**< True once initial option negotiation has been sent. */
   bool local_echo;               /**< True once the peer agreed that this end echoes. */
   bool local_sga;                /**< True once the peer agreed to suppress-go-ahead here. */
@@ -151,6 +156,19 @@ void cli_telnet_init(cli_telnet_ctx_struct_t *ctx, cli_transport_struct_t *trans
  * @param[in] ctx  Initialised Telnet context.
  */
 void cli_telnet_negotiate(cli_telnet_ctx_struct_t *ctx);
+
+/**
+ * @brief Tell a CLI session the client's window width, now and whenever it changes.
+ *
+ * The client reports its window size (NAWS) when the connection starts and after each
+ * resize; the session's line editor uses the width for lines longer than one row
+ * (@c cli_set_terminal_width()). Call after @c cli_init(); a width already reported is
+ * passed on at once.
+ *
+ * @param[in] ctx  Initialised Telnet context.
+ * @param[in] cli  Session using this connection, or @c NULL to stop.
+ */
+void cli_telnet_set_session(cli_telnet_ctx_struct_t *ctx, cli_struct_t *cli);
 
 /**
  * @brief Create a listening TCP socket for Telnet sessions.

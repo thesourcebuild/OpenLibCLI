@@ -150,6 +150,8 @@ int main(int argc, char *argv[]) {
 #else
         cli_init(&demo_cli, "router", &transport, NULL, demo_cmd_pool, CLI_MAX_COMMANDS);
 #endif
+        /* The client's window width (NAWS) goes to the line editor, also after a resize. */
+        cli_telnet_set_session(&telnet_ctx, &demo_cli);
 
         //>! These are the defaults. For demonstration setting them explicitly here.
         cli_set_exit_root_policy(&demo_cli, CLI_EXIT_ROOT_POLICY_CLOSE_SESSION);

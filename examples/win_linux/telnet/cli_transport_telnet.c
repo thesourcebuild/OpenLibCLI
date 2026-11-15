@@ -175,6 +175,8 @@ static bool cli_telnet_option_update(cli_telnet_ctx_struct_t *ctx, bool *enabled
                                      bool enable);
 static void cli_telnet_respond(cli_telnet_ctx_struct_t *ctx, uint8_t verb, uint8_t opt);
 static bool cli_telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, uint8_t *out);
+static void cli_telnet_sb_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte);
+static void cli_telnet_sb_end(cli_telnet_ctx_struct_t *ctx);
 
 static cli_transport_ret_t cli_telnet_transport_available(void *raw_ctx);
 static cli_transport_ret_t cli_telnet_transport_read(void *raw_ctx);
@@ -209,6 +211,13 @@ void cli_telnet_negotiate(cli_telnet_ctx_struct_t *ctx) {
   /* Options take effect only once the peer answers (RFC 1143); until then the requests
    * are pending. DONT LINEMODE asks for the default state and expects no answer. */
   ctx->pending = (uint8_t)(TELNET_PENDING_ECHO | TELNET_PENDING_SGA | TELNET_PENDING_NAWS);
+}
+
+void cli_telnet_set_session(cli_telnet_ctx_struct_t *ctx, cli_struct_t *cli) {
+  ctx->cli = cli;
+  if (cli != NULL && ctx->window_width > 0U) {
+    cli_set_terminal_width(cli, ctx->window_width);
+  }
 }
 
 int32_t cli_telnet_listen(uint16_t port) {
@@ -613,26 +622,20 @@ static bool cli_telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, 
   case TELNET_STATE_SB:
     if (byte == TELNET_IAC) {
       ctx->state = TELNET_STATE_SB_IAC;
-    } else if (++ctx->sb_len > CLI_TELNET_MAX_SB_LEN) {
-      /* No IAC SE in sight (broken client): give up on the block so input is not
-       * swallowed forever. The remaining bytes are treated as normal data. */
-      ctx->state = TELNET_STATE_NORMAL;
     } else {
-      /* Sub-negotiation payload (e.g. NAWS size) is not used. */
+      cli_telnet_sb_byte(ctx, byte);
     }
     break;
 
   case TELNET_STATE_SB_IAC:
     if (byte == TELNET_SE) {
+      cli_telnet_sb_end(ctx);
       ctx->state = TELNET_STATE_NORMAL;
     } else if (byte == TELNET_IAC) {
       /* An escaped 0xFF is one payload byte: it counts towards the limit like any other, so
        * a block of escaped bytes cannot hold back the input that follows it either. */
-      if (++ctx->sb_len > CLI_TELNET_MAX_SB_LEN) {
-        ctx->state = TELNET_STATE_NORMAL;
-      } else {
-        ctx->state = TELNET_STATE_SB;
-      }
+      ctx->state = TELNET_STATE_SB;
+      cli_telnet_sb_byte(ctx, 0xFFU);
     } else {
       /* IAC <command> inside SB: the block was never terminated; resume normal parsing. */
       ctx->state = TELNET_STATE_IAC;
@@ -646,6 +649,48 @@ static bool cli_telnet_process_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte, 
   }
 
   return stored;
+}
+
+/**
+ * @brief Take one payload byte of a sub-negotiation (after @c IAC @c SB).
+ *
+ * Its start (the option and, for NAWS, the window size) is kept for
+ * @c cli_telnet_sb_end(). A block longer than @c CLI_TELNET_MAX_SB_LEN (no @c IAC @c SE
+ * from a broken client) is given up, so input is not swallowed forever: the remaining
+ * bytes are treated as normal data.
+ *
+ * @param[in,out] ctx   Telnet context.
+ * @param[in]     byte  Payload byte (an escaped 0xFF counts as one).
+ */
+static void cli_telnet_sb_byte(cli_telnet_ctx_struct_t *ctx, uint8_t byte) {
+  if (ctx->sb_len < sizeof(ctx->sb_buf)) {
+    ctx->sb_buf[ctx->sb_len] = byte;
+  }
+  ctx->sb_len++;
+  if (ctx->sb_len > CLI_TELNET_MAX_SB_LEN) {
+    ctx->state = TELNET_STATE_NORMAL;
+  }
+}
+
+/**
+ * @brief Act on a complete sub-negotiation (@c IAC @c SE received).
+ *
+ * NAWS (RFC 1073) reports the client's window: width and height, 16 bits each, most
+ * significant byte first. A width of 0 means unknown and is not used.
+ *
+ * @param[in,out] ctx  Telnet context.
+ */
+static void cli_telnet_sb_end(cli_telnet_ctx_struct_t *ctx) {
+  if (ctx->sb_len >= 5U && ctx->sb_buf[0] == TELNET_OPT_NAWS) {
+    uint16_t width = (uint16_t)(((uint16_t)ctx->sb_buf[1] << 8) | ctx->sb_buf[2]);
+
+    if (width > 0U) {
+      ctx->window_width = width;
+      if (ctx->cli != NULL) {
+        cli_set_terminal_width(ctx->cli, width);
+      }
+    }
+  }
 }
 
 /* Transport Callbacks ------------------------------------------------------------------*/

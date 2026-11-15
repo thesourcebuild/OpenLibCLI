@@ -2950,6 +2950,380 @@ static void t_line(cli_struct_t *cli, const char *line) {
 }
 #endif
 
+/* Round 8 regressions ------------------------------------------------------------------*/
+
+#if CLI_ENABLE_PIPE_FILTER
+/* One line longer than the output line buffer, printed in parts (nothing is cut off by
+ * the format buffer). "NEEDLE" starts three characters before the first piece ends. */
+static int8_t cmd_long_line(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                            const char *argv[]) {
+  char part[CLI_MAX_OUTPUT_BUF];
+
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  memset(part, 'a', sizeof(part) - 4U);
+  part[sizeof(part) - 4U] = '\0';
+  cli_print(cli, "%s", part);
+  cli_println(cli, "NEEDLE tail");
+  cli_println(cli, "other");
+  return CLI_OK;
+}
+
+static void test_filter_long_line_pieces(void) {
+  TEST_START("filter_long_line_pieces");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "long", cmd_long_line, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  session_start();
+
+  /* A pattern split by the piece boundary is still found. */
+  type("long | include NEEDLE\r");
+  ASSERT_OUT("NEEDLE tail\r\n");
+  ASSERT_NOT_OUT("other");
+  out_clear();
+  type("long | exclude NEEDLE\r");
+  ASSERT_NOT_OUT("DLE tail");
+  ASSERT_OUT("other\r\n");
+  out_clear();
+  type("long | begin NEEDLE\r");
+  ASSERT_OUT("NEEDLE tail\r\n");
+  ASSERT_OUT("other\r\n");
+
+  /* The pieces of a line stay one line on the terminal. */
+  out_clear();
+  type("long | exclude other\r");
+  ASSERT_OUT("aaaaNEEDLE tail\r\n");
+  ASSERT_NOT_OUT("a\r\na");
+  TEST_END();
+}
+#endif
+
+static cli_cmd_handle_t s_swap_self;
+
+/* Removes itself and registers a submenu, which takes over the freed slot. */
+static int8_t cmd_swap(cli_struct_t *cli, const char *cmd, cli_argc_t argc, const char *argv[]) {
+  cli_cmd_handle_t h;
+
+  (void)argc;
+  (void)argv;
+  (void)cli_remove_command(cli, s_swap_self);
+  h = cli_add_command(cli, CLI_CMD_ROOT, "other", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  (void)cli_add_command(cli, h, "child", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  cli_println(cli, "cmd=%s reused=%d", cmd, (h == s_swap_self) ? 1 : 0);
+  return CLI_OK;
+}
+
+static void test_command_removed_while_running(void) {
+  TEST_START("command_removed_while_running");
+  session_new();
+  s_swap_self =
+      cli_add_command(&s_cli, CLI_CMD_ROOT, "swap", cmd_swap, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  session_start();
+
+  type("swap\r");
+  ASSERT_OUT("cmd=swap reused=1"); /* its name survives the removal */
+  ASSERT_EQ(s_cli.nav_depth, 0);   /* not taken for the submenu now in its slot */
+  ASSERT_EQ(s_cli.context, CLI_CMD_ROOT);
+  TEST_END();
+}
+
+/* Prints a partial line, then runs an unknown command. */
+static int8_t cmd_part_exec(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                            const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  cli_print(cli, "partial ");
+  (void)cli_exec(cli, "zz");
+  cli_println(cli, "after");
+  return CLI_OK;
+}
+
+static void test_nested_error_placement(void) {
+  TEST_START("nested_error_placement");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "part", cmd_part_exec, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  session_start();
+
+  /* On a line of its own, after the output already produced. */
+  type("part\r");
+  ASSERT_OUT("partial \r\n% Unknown command: zz\r\nafter\r\n");
+#if CLI_ENABLE_PIPE_FILTER
+  out_clear();
+  type("part | include partial\r");
+  ASSERT_OUT("partial \r\n% Unknown command: zz\r\n");
+  ASSERT_NOT_OUT("after");
+
+  /* A line that is only a filter is reported. */
+  out_clear();
+  type("| include a\r");
+  ASSERT_OUT("% Missing command before '|'.");
+#endif
+#if CLI_ENABLE_PRINT_TRANSPORT_CB
+  /* Delivered like cli_error() lines. */
+  s_lines[0] = '\0';
+  cli_set_print_transport_cb(&s_cli, t_line);
+  type("bogus\r");
+  cli_set_print_transport_cb(&s_cli, NULL);
+  ASSERT_STR_EQ(s_lines, "<% Unknown command: bogus>");
+#endif
+  TEST_END();
+}
+
+static void test_keyword_printable_ascii(void) {
+  TEST_START("keyword_printable_ascii");
+  session_new();
+  /* Bytes the line editor does not accept could never be typed. */
+  ASSERT_EQ(cli_add_command(&s_cli, CLI_CMD_ROOT, "caf\xC3\xA9", cmd_name, CLI_PRIV_USER,
+                            CLI_MODE_ANY, ""),
+            CLI_CMD_INVALID);
+  ASSERT_EQ(cli_add_command(&s_cli, CLI_CMD_ROOT, "del\x7F", cmd_name, CLI_PRIV_USER,
+                            CLI_MODE_ANY, ""),
+            CLI_CMD_INVALID);
+  ASSERT_TRUE(cli_add_command(&s_cli, CLI_CMD_ROOT, "cafe~", cmd_name, CLI_PRIV_USER,
+                              CLI_MODE_ANY, "") != CLI_CMD_INVALID);
+  TEST_END();
+}
+
+#if CLI_ENABLE_LINE_WRAP
+/* A VT100 screen of VT_WIDTH columns: what the terminal shows for the session's output.
+ * Printable characters wrap the way terminals do: the last column of a row leaves the cursor
+ * there until the next character arrives (deferred wrap). */
+#define VT_WIDTH 20
+#define VT_ROWS  12
+
+static char s_vt[VT_ROWS][VT_WIDTH + 1];
+static int s_vt_row;
+static int s_vt_col;
+static bool s_vt_pending;
+static size_t s_vt_fed;
+static int s_vt_queries; /* width queries (cursor position reports asked for) */
+
+static void vt_clear_from(int row, int col) {
+  for (int r = row; r < VT_ROWS; r++) {
+    for (int c = (r == row) ? col : 0; c < VT_WIDTH; c++) {
+      s_vt[r][c] = ' ';
+    }
+  }
+}
+
+static void vt_reset(void) {
+  vt_clear_from(0, 0);
+  for (int r = 0; r < VT_ROWS; r++) {
+    s_vt[r][VT_WIDTH] = '\0';
+  }
+  s_vt_row = 0;
+  s_vt_col = 0;
+  s_vt_pending = false;
+  s_vt_fed = s_out_len;
+  s_vt_queries = 0;
+}
+
+static void vt_csi(int n, char final) {
+  int count = (n > 0) ? n : 1;
+
+  s_vt_pending = false;
+  if (final == 'A') {
+    s_vt_row = (s_vt_row - count < 0) ? 0 : s_vt_row - count;
+  } else if (final == 'B') {
+    s_vt_row = (s_vt_row + count >= VT_ROWS) ? VT_ROWS - 1 : s_vt_row + count;
+  } else if (final == 'C') {
+    s_vt_col = (s_vt_col + count >= VT_WIDTH) ? VT_WIDTH - 1 : s_vt_col + count;
+  } else if (final == 'D') {
+    s_vt_col = (s_vt_col - count < 0) ? 0 : s_vt_col - count;
+  } else if (final == 'K') {
+    for (int c = s_vt_col; c < VT_WIDTH; c++) {
+      s_vt[s_vt_row][c] = ' ';
+    }
+  } else if (final == 'J') {
+    if (n == 2) {
+      vt_clear_from(0, 0);
+    } else {
+      vt_clear_from(s_vt_row, s_vt_col);
+    }
+  } else if (final == 'H') {
+    s_vt_row = 0;
+    s_vt_col = 0;
+  } else if (final == 'n' && n == 6) {
+    s_vt_queries++;
+  } else {
+    /* Not used by the editor. */
+  }
+}
+
+/** Show on the screen what the session wrote since the last call. */
+static void vt_update(void) {
+  while (s_vt_fed < s_out_len) {
+    unsigned char c = (unsigned char)s_out[s_vt_fed++];
+
+    if (c == 0x1BU && s_vt_fed < s_out_len && s_out[s_vt_fed] == '[') {
+      int n = 0;
+      s_vt_fed++;
+      while (s_vt_fed < s_out_len && s_out[s_vt_fed] >= '0' && s_out[s_vt_fed] <= '9') {
+        n = n * 10 + (s_out[s_vt_fed] - '0');
+        s_vt_fed++;
+      }
+      vt_csi(n, s_out[s_vt_fed++]);
+    } else if (c == '\r') {
+      s_vt_col = 0;
+      s_vt_pending = false;
+    } else if (c == '\n') {
+      s_vt_row = (s_vt_row + 1 < VT_ROWS) ? s_vt_row + 1 : s_vt_row;
+      s_vt_pending = false;
+    } else if (c == 0x08U) {
+      s_vt_col = (s_vt_pending || s_vt_col == 0) ? s_vt_col : s_vt_col - 1;
+      s_vt_pending = false;
+    } else if (c >= 0x20U && c < 0x7FU) {
+      if (s_vt_pending) {
+        s_vt_col = 0;
+        s_vt_row = (s_vt_row + 1 < VT_ROWS) ? s_vt_row + 1 : s_vt_row;
+        s_vt_pending = false;
+      }
+      s_vt[s_vt_row][s_vt_col] = (char)c;
+      if (s_vt_col == VT_WIDTH - 1) {
+        s_vt_pending = true;
+      } else {
+        s_vt_col++;
+      }
+    } else {
+      /* BEL and other controls do not change the screen. */
+    }
+  }
+}
+
+/** Assert that screen row @p row shows @p text (blanks to the end of the row). */
+static void vt_assert_row(int row, const char *text, int line) {
+  char expect[VT_WIDTH + 1];
+
+  memset(expect, ' ', VT_WIDTH);
+  expect[VT_WIDTH] = '\0';
+  memcpy(expect, text, strlen(text));
+  s_asserts++;
+  if (strcmp(s_vt[row], expect) != 0) {
+    fprintf(stderr, "  FAIL [%s] line %d: screen row %d is \"%s\", expected \"%s\"\n",
+            s_cur_test, line, row, s_vt[row], expect);
+    s_tests_fail++;
+  }
+}
+
+#define ASSERT_ROW(row, text) vt_assert_row((row), (text), (int)__LINE__)
+
+static void test_editor_follows_line_wrap(void) {
+  TEST_START("editor_follows_line_wrap");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "echo", cmd_echo, CLI_PRIV_USER, CLI_MODE_ANY,
+                        "");
+  cli_set_terminal_width(&s_cli, VT_WIDTH);
+  out_clear();
+  vt_reset();
+  cli_start(&s_cli);
+  (void)run();
+
+  /* "rtr> " and 30 characters: two rows. */
+  type("echo abcdefghijklmnopqrstuvwxy");
+  vt_update();
+  ASSERT_ROW(0, "rtr> echo abcdefghij");
+  ASSERT_ROW(1, "klmnopqrstuvwxy");
+  ASSERT_EQ(s_vt_row, 1);
+  ASSERT_EQ(s_vt_col, 15);
+
+  /* Home goes to the first row; an insertion there pushes the rest along both rows. */
+  type("\x01" "X");
+  vt_update();
+  ASSERT_ROW(0, "rtr> Xecho abcdefghi");
+  ASSERT_ROW(1, "jklmnopqrstuvwxy");
+  ASSERT_EQ(s_vt_row, 0);
+  ASSERT_EQ(s_vt_col, 6);
+
+  /* Deleting it again, and moving across the row boundary with the arrow keys. */
+  type("\x08" "\x1b[C\x1b[C\x1b[C\x1b[C");
+  vt_update();
+  ASSERT_ROW(0, "rtr> echo abcdefghij");
+  ASSERT_ROW(1, "klmnopqrstuvwxy");
+  ASSERT_EQ(s_vt_col, 9);
+  type("\x05\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D"
+       "\x1b[D\x1b[D");
+  vt_update();
+  ASSERT_EQ(s_vt_row, 0); /* 16 to the left of the end: the last column of the first row */
+  ASSERT_EQ(s_vt_col, 19);
+
+  /* A line that ends exactly at the end of a row ("rtr> " and 15 characters): the cursor
+   * waits on the next row. */
+  type("\x05\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08\x08");
+  vt_update();
+  ASSERT_ROW(0, "rtr> echo abcdefghij");
+  ASSERT_ROW(1, "");
+  ASSERT_EQ(s_vt_row, 1);
+  ASSERT_EQ(s_vt_col, 0);
+  type("\x08");
+  vt_update();
+  ASSERT_ROW(0, "rtr> echo abcdefghi");
+  ASSERT_EQ(s_vt_row, 0);
+  ASSERT_EQ(s_vt_col, 19);
+
+  /* Ctrl+K from the middle clears the rest, on the rows below too. */
+  type("klmnopqrstuvwxyz\x01\x1b[C\x1b[C\x1b[C\x1b[C\x0b");
+  vt_update();
+  ASSERT_ROW(0, "rtr> echo");
+  ASSERT_ROW(1, "");
+
+  /* Enter from the middle of a long line: the output starts below the whole line. */
+  type(" abcdefghijklmnopqrstuvw\x01\r");
+  vt_update();
+  ASSERT_ROW(0, "rtr> echo abcdefghij");
+  ASSERT_ROW(1, "klmnopqrstuvw");
+  ASSERT_ROW(2, "ARGS [abcdefghijklmn");
+  TEST_END();
+}
+
+static void test_terminal_width_query(void) {
+  TEST_START("terminal_width_query");
+  session_new();
+  out_clear();
+  vt_reset();
+  cli_start(&s_cli);
+  (void)run();
+  vt_update();
+  /* The session start asks the terminal for its width; the reply sets it. */
+  ASSERT_EQ(s_vt_queries, 1);
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 0U);
+  type("\x1b[24;132R");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 132U);
+  ASSERT_EQ(s_cli.input_len, 0);
+
+  /* The same bytes without a query pending (a modified F3 key) change nothing. */
+  type("\x1b[1;5R");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 132U);
+
+  /* Ctrl+L asks again: the terminal may have been resized. */
+  type("\x0c");
+  vt_update();
+  ASSERT_EQ(s_vt_queries, 2);
+  type("\x1b[30;80R");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 80U);
+
+  /* An explicit width (Telnet window size) replaces a reply still to come. */
+  type("\x0c");
+  cli_set_terminal_width(&s_cli, 100U);
+  type("\x1b[30;60R");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 100U);
+
+#if CLI_ENABLE_AUTH
+  /* A reply that arrives during the login is not typed into it. */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  session_start();
+  type("ad\x1b[24;90Rmin\rpw\r");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 90U);
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_AUTHENTICATED);
+#endif
+  TEST_END();
+}
+#endif
+
 static void test_async_partial_line_kept_apart(void) {
   TEST_START("async_partial_line_kept_apart");
   session_new();
@@ -3151,7 +3525,12 @@ static void test_idle_reset_message_placement(void) {
   out_clear();
   s_now += 5U;
   (void)run();
+#if CLI_ENABLE_LINE_WRAP
+  /* The new session asks for the terminal width before its prompt. */
+  ASSERT_OUT("\r\n% Idle timeout. Session restarted.\r\n\x1b[999C\x1b[6n\rrtr> ");
+#else
   ASSERT_OUT("\r\n% Idle timeout. Session restarted.\r\nrtr> ");
+#endif
   ASSERT_NOT_OUT("\r\n\r\n");
   TEST_END();
 }
@@ -4648,6 +5027,16 @@ int main(void) {
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_credential_callback_restart);
   RUN_SUITE(test_callback_replaces_session);
+#endif
+#if CLI_ENABLE_PIPE_FILTER
+  RUN_SUITE(test_filter_long_line_pieces);
+#endif
+  RUN_SUITE(test_command_removed_while_running);
+  RUN_SUITE(test_nested_error_placement);
+  RUN_SUITE(test_keyword_printable_ascii);
+#if CLI_ENABLE_LINE_WRAP
+  RUN_SUITE(test_editor_follows_line_wrap);
+  RUN_SUITE(test_terminal_width_query);
 #endif
   RUN_SUITE(test_async_partial_line_kept_apart);
 #if CLI_ENABLE_HISTORY
