@@ -1958,7 +1958,8 @@ static void test_rx_budget_per_tick(void) {
   session_new();
   session_start();
 
-  for (size_t i = 0; i < (size_t)CLI_MAX_RX_BYTES_PER_TICK + 100U; i++) {
+  /* One budget and half another: the first tick takes the budget, the second the rest. */
+  for (size_t i = 0; i < (size_t)CLI_MAX_RX_BYTES_PER_TICK * 3U / 2U; i++) {
     s_in[s_in_len++] = 'a';
   }
   ASSERT_EQ(cli_session_engine(&s_cli), CLI_OK);
@@ -3407,6 +3408,17 @@ static void test_width_reply_handling(void) {
   (void)run();
   type("\x1b[1;2R");
   ASSERT_EQ(cli_get_terminal_width(&s_cli), 0U);
+
+  /* A reply already being received when the time runs out is still taken whole: its last
+   * bytes are not a key. */
+  session_new();
+  session_start();
+  type("\x1b[24;8");
+  s_now += 2U;
+  (void)run();
+  type("0R");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 80U);
+  ASSERT_EQ(s_cli.input_len, 0);
 #endif
 
 #if CLI_ENABLE_IDLE_TIMEOUT

@@ -108,6 +108,8 @@ typedef struct {
   uint8_t sb_buf[5];     /**< Start of the current sub-negotiation: option and the
                               window size of NAWS (width, height; 16 bits each). */
   uint16_t window_width; /**< Client window width (NAWS), 0 until reported. */
+  bool window_width_due;    /**< @c window_width still waits for the input sent before it. */
+  uint16_t window_width_at; /**< How much of @c rx_buf that input is. */
   cli_struct_t *cli;     /**< Session told about window size changes, or NULL. */
   bool negotiated;       /**< True once initial option negotiation has been sent. */
   bool local_echo;       /**< True once the peer agreed that this end echoes. */
