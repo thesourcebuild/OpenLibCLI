@@ -5,7 +5,7 @@
  * Implements the host stdin/stdout serial transport and the POSIX
  * file-descriptor transport used for host stream endpoints.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */
@@ -57,7 +57,6 @@ static uint8_t s_serial_key_buf[4];
 static uint8_t s_serial_key_len = 0;
 static uint8_t s_serial_key_idx = 0;
 #endif
-
 
 /*=======================================================================================
  * Private Function Prototypes

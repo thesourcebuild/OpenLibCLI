@@ -5,7 +5,7 @@
  * Shared by @c cli_server_unix_socket.c to centralise the default socket
  * path for the UNIX domain socket CLI server demo.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */

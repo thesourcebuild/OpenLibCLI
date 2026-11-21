@@ -6,7 +6,7 @@
  * stdout on Windows and Unix-like systems. A POSIX file-descriptor transport
  * is also declared here for ptys, pipes, and similar stream endpoints.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */

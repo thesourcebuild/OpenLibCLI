@@ -5,7 +5,7 @@
  * Implements a host-side serial CLI demo using the host serial transport with
  * stdin/stdout as the byte source and sink.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */

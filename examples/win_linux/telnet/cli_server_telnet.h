@@ -5,7 +5,7 @@
  * Shared by @c cli_server_telnet.c to centralise the default TCP port for
  * the Telnet CLI server demo.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */

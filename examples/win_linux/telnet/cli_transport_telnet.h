@@ -40,7 +40,7 @@
  *   cli_tcp_close(conn);
  * @endcode
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */
@@ -101,24 +101,24 @@ extern "C" {
  * @c cli_telnet_init(). Treat all fields as internal state.
  */
 typedef struct {
-  int32_t fd;                    /**< Connected socket file descriptor. */
-  uint8_t state;                 /**< IAC parser state. */
-  uint8_t verb;                  /**< IAC verb byte being processed. */
-  uint16_t sb_len;               /**< Bytes consumed in the current sub-negotiation. */
-  uint8_t sb_buf[5];             /**< Start of the current sub-negotiation: option and the
-                                      window size of NAWS (width, height; 16 bits each). */
-  uint16_t window_width;         /**< Client window width (NAWS), 0 until reported. */
-  cli_struct_t *cli;             /**< Session told about window size changes, or NULL. */
-  bool negotiated;               /**< True once initial option negotiation has been sent. */
-  bool local_echo;               /**< True once the peer agreed that this end echoes. */
-  bool local_sga;                /**< True once the peer agreed to suppress-go-ahead here. */
-  bool remote_naws;              /**< True once the peer agreed to send its window size. */
-  uint8_t pending;               /**< Our option requests still awaiting an answer. */
-  uint8_t rx_buf[256];           /**< Receive staging buffer. */
-  uint16_t rx_len;               /**< Bytes currently stored in @c rx_buf. */
-  uint16_t rx_pos;               /**< Read cursor within @c rx_buf. */
-  uint8_t tx_buf[64];            /**< Reserved transmit staging buffer. */
-  uint16_t tx_len;               /**< Reserved transmit staging length. */
+  int32_t fd;            /**< Connected socket file descriptor. */
+  uint8_t state;         /**< IAC parser state. */
+  uint8_t verb;          /**< IAC verb byte being processed. */
+  uint16_t sb_len;       /**< Bytes consumed in the current sub-negotiation. */
+  uint8_t sb_buf[5];     /**< Start of the current sub-negotiation: option and the
+                              window size of NAWS (width, height; 16 bits each). */
+  uint16_t window_width; /**< Client window width (NAWS), 0 until reported. */
+  cli_struct_t *cli;     /**< Session told about window size changes, or NULL. */
+  bool negotiated;       /**< True once initial option negotiation has been sent. */
+  bool local_echo;       /**< True once the peer agreed that this end echoes. */
+  bool local_sga;        /**< True once the peer agreed to suppress-go-ahead here. */
+  bool remote_naws;      /**< True once the peer agreed to send its window size. */
+  uint8_t pending;       /**< Our option requests still awaiting an answer. */
+  uint8_t rx_buf[256];   /**< Receive staging buffer. */
+  uint16_t rx_len;       /**< Bytes currently stored in @c rx_buf. */
+  uint16_t rx_pos;       /**< Read cursor within @c rx_buf. */
+  uint8_t tx_buf[64];    /**< Reserved transmit staging buffer. */
+  uint16_t tx_len;       /**< Reserved transmit staging length. */
 } cli_telnet_ctx_struct_t;
 
 /** @brief Invalid socket / fd sentinel for Telnet helpers. */

@@ -5,7 +5,7 @@
  * Shared by @c cli_server_pipe.c to centralise the default pipe name used
  * in named-pipe and anonymous-pipe demo modes.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */

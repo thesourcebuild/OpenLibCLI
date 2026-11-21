@@ -2997,6 +2997,61 @@ static void test_filter_long_line_pieces(void) {
   ASSERT_NOT_OUT("a\r\na");
   TEST_END();
 }
+
+static size_t s_pattern_pos;
+
+/* One line longer than the output line buffer: dots with "abc" at s_pattern_pos. */
+static int8_t cmd_pattern_line(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                               const char *argv[]) {
+  char chunk[CLI_MAX_OUTPUT_BUF];
+  size_t total = (size_t)CLI_MAX_OUTPUT_BUF + 40U;
+  size_t i = 0U;
+
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  while (i < total) {
+    size_t n = 0U;
+    while (n < sizeof(chunk) - 1U && i < total) {
+      bool in_pattern = (i >= s_pattern_pos && i < s_pattern_pos + 3U);
+      chunk[n] = in_pattern ? (char)('a' + (i - s_pattern_pos)) : '.';
+      n++;
+      i++;
+    }
+    chunk[n] = '\0';
+    cli_print(cli, "%s", chunk);
+  }
+  cli_println(cli, "");
+  return CLI_OK;
+}
+
+static void test_filter_pattern_at_piece_boundary(void) {
+  size_t cap = (size_t)CLI_MAX_OUTPUT_BUF - 1U; /* characters a full line buffer holds */
+
+  TEST_START("filter_pattern_at_piece_boundary");
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "pline", cmd_pattern_line, CLI_PRIV_USER,
+                        CLI_MODE_ANY, "");
+  session_start();
+
+  /* Every position around the end of the first full buffer: the pattern is found wherever
+   * the piece boundary splits it. ("abc" also appears once in the echoed command.) */
+  for (s_pattern_pos = cap - 6U; s_pattern_pos <= cap + 2U; s_pattern_pos++) {
+    out_clear();
+    type("pline | include abc\r");
+    ASSERT_EQ(out_count("abc"), 2);
+    out_clear();
+    type("pline | exclude abc\r");
+    ASSERT_EQ(out_count("abc"), 1);
+    if (s_pattern_pos + 3U <= cap) {
+      ASSERT_NOT_OUT(".."); /* found before any piece went out: nothing of the line shown */
+    }
+    out_clear();
+    type("pline | begin abc\r");
+    ASSERT_EQ(out_count("abc"), 2);
+  }
+  TEST_END();
+}
 #endif
 
 static cli_cmd_handle_t s_swap_self;
@@ -3161,8 +3216,16 @@ static void vt_update(void) {
     if (c == 0x1BU && s_vt_fed < s_out_len && s_out[s_vt_fed] == '[') {
       int n = 0;
       s_vt_fed++;
-      while (s_vt_fed < s_out_len && s_out[s_vt_fed] >= '0' && s_out[s_vt_fed] <= '9') {
-        n = n * 10 + (s_out[s_vt_fed] - '0');
+      bool first = true; /* only the first parameter is used */
+      while (s_vt_fed < s_out_len &&
+             ((s_out[s_vt_fed] >= '0' && s_out[s_vt_fed] <= '9') || s_out[s_vt_fed] == ';')) {
+        if (s_out[s_vt_fed] == ';') {
+          first = false;
+        } else if (first) {
+          n = n * 10 + (s_out[s_vt_fed] - '0');
+        } else {
+          /* A later parameter (e.g. a colour). */
+        }
         s_vt_fed++;
       }
       vt_csi(n, s_out[s_vt_fed++]);
@@ -3319,6 +3382,127 @@ static void test_terminal_width_query(void) {
   type("ad\x1b[24;90Rmin\rpw\r");
   ASSERT_EQ(cli_get_terminal_width(&s_cli), 90U);
   ASSERT_EQ(s_cli.auth_state, CLI_AUTH_AUTHENTICATED);
+#endif
+  TEST_END();
+}
+
+static void test_width_reply_handling(void) {
+  TEST_START("width_reply_handling");
+
+#if CLI_ENABLE_TIME_SOURCE
+  /* A query not answered in time is given up: a modified F3 pressed later (the same bytes
+   * as a reply) is not taken for one. */
+  session_new();
+  session_start();
+  s_now += 3U;
+  (void)run();
+  type("\x1b[1;2R");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 0U);
+#endif
+
+#if CLI_ENABLE_IDLE_TIMEOUT
+  /* The terminal's reply is not user activity: an idle session is reset once, not again in
+   * every period because each new session's query is answered. */
+  {
+    int answered = 0;
+
+    session_new();
+    cli_set_idle_timeout(&s_cli, 5U);
+    cli_set_idle_timeout_mode(&s_cli, CLI_IDLE_TIMEOUT_POLICY_RESET_SESSION);
+    session_start();
+    type("\x1b[24;80R"
+         "ab");
+    out_clear();
+    for (int i = 0; i < 4; i++) {
+      s_now += 6U;
+      (void)run();
+      if (out_count("\x1b[6n") > answered) {
+        type("\x1b[24;80R");
+        answered++;
+      }
+    }
+    ASSERT_EQ(out_count("Session restarted"), 1);
+  }
+#endif
+
+#if CLI_ENABLE_AUTH && CLI_ENABLE_TIME_SOURCE
+  /* A reply that arrives during a lockout (a new session asked) is still taken. */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_auth_failure_mode(&s_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
+  session_start();
+  type("\x1b[24;50R"
+       "admin\rx\radmin\rx\radmin\rx\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  cli_restart_session(&s_cli);
+  (void)run();
+  type("\x1b[24;30R");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 30U);
+#endif
+
+  /* A width change while a line reaching the end of a row is shown draws it again on a
+   * fresh row; a line within one row at both widths is left alone. */
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "echo", cmd_echo, CLI_PRIV_USER, CLI_MODE_ANY,
+                        "");
+  cli_set_terminal_width(&s_cli, 20U);
+  session_start();
+  type("echo abcdefghijklmnopqrstuvwxy");
+  out_clear();
+  cli_set_terminal_width(&s_cli, 40U);
+  ASSERT_OUT("\r\n\x1b[J\rrtr> echo abcdefghijklmnopqrstuvwxy");
+  type("\x15");
+  out_clear();
+  cli_set_terminal_width(&s_cli, 30U);
+  ASSERT_EQ(s_out_len, 0U);
+  TEST_END();
+}
+
+static void test_wrap_prompt_edges(void) {
+  TEST_START("wrap_prompt_edges");
+
+  /* The prompt takes the columns it shows: colours take none. */
+  session_new();
+  (void)cli_set_hostname(&s_cli, "\x1b[1;32mrtr\x1b[0m");
+  cli_set_terminal_width(&s_cli, VT_WIDTH);
+  out_clear();
+  vt_reset();
+  cli_start(&s_cli);
+  (void)run();
+  type("abcdefghijklmnopqrstuvwxyz0123\x01"
+       "X");
+  vt_update();
+  ASSERT_ROW(0, "rtr> Xabcdefghijklmn");
+  ASSERT_ROW(1, "opqrstuvwxyz0123");
+  ASSERT_EQ(s_vt_row, 0);
+  ASSERT_EQ(s_vt_col, 6);
+
+  /* '?' on a line that fills its row: the help starts below it, the '?' on the row it took. */
+  session_new();
+  (void)cli_add_command(&s_cli, CLI_CMD_ROOT, "echo", cmd_echo, CLI_PRIV_USER, CLI_MODE_ANY,
+                        "");
+  cli_set_terminal_width(&s_cli, VT_WIDTH);
+  out_clear();
+  vt_reset();
+  cli_start(&s_cli);
+  (void)run();
+  type("echo aaaaaaaaaa?");
+  vt_update();
+  ASSERT_ROW(0, "rtr> echo aaaaaaaaaa");
+  ASSERT_ROW(1, "?");
+  ASSERT_ROW(2, "  <cr>");
+  ASSERT_ROW(3, "rtr> echo aaaaaaaaaa");
+
+#if CLI_ENABLE_AUTH
+  /* A "Password: " prompt that fills its row leaves the cursor at the start of the next. */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_terminal_width(&s_cli, 10U);
+  session_start();
+  type("admin\r");
+  ASSERT_OUT("Password: \r\n");
 #endif
   TEST_END();
 }
@@ -5030,6 +5214,7 @@ int main(void) {
 #endif
 #if CLI_ENABLE_PIPE_FILTER
   RUN_SUITE(test_filter_long_line_pieces);
+  RUN_SUITE(test_filter_pattern_at_piece_boundary);
 #endif
   RUN_SUITE(test_command_removed_while_running);
   RUN_SUITE(test_nested_error_placement);
@@ -5037,6 +5222,8 @@ int main(void) {
 #if CLI_ENABLE_LINE_WRAP
   RUN_SUITE(test_editor_follows_line_wrap);
   RUN_SUITE(test_terminal_width_query);
+  RUN_SUITE(test_width_reply_handling);
+  RUN_SUITE(test_wrap_prompt_edges);
 #endif
   RUN_SUITE(test_async_partial_line_kept_apart);
 #if CLI_ENABLE_HISTORY

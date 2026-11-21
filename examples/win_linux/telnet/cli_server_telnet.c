@@ -5,7 +5,7 @@
  * Listens on TCP port 2323 by default and serves a CLI
  * session for each incoming TCP connection.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */

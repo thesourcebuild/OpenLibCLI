@@ -5,7 +5,7 @@
  * Provides the @c cli_server_serial_run() entry point for the host-side
  * serial demo without depending on @c cli_serial_app.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */

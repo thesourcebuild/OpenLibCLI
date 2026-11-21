@@ -7,7 +7,7 @@
  * POSIX sockets and Winsock. On Arduino the public functions are compiled as
  * no-ops.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */
@@ -115,10 +115,10 @@
 
 #elif ENV_IS_UNIX_LIKE
 /** @brief Close a TCP socket on POSIX. */
-#define CLI_TCP_CLOSE_SOCKET(socket_fd)       close(socket_fd)
+#define CLI_TCP_CLOSE_SOCKET(socket_fd)      close(socket_fd)
 
 /** @brief Socket receive wrapper. */
-#define CLI_TELNET_SOCK_READ(sock, buf, len)  read((sock), (buf), (len))
+#define CLI_TELNET_SOCK_READ(sock, buf, len) read((sock), (buf), (len))
 
 #ifdef MSG_NOSIGNAL
 /** @brief Send flags: report EPIPE instead of raising SIGPIPE (Linux / BSD). */

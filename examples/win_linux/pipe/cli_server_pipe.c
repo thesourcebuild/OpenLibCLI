@@ -47,7 +47,7 @@
  *       examples/win_linux/pipe/cli_server_pipe.c -ladvapi32 -o cli_server_pipe.exe
  * @endcode
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */
@@ -620,8 +620,7 @@ static void run_interactive_relay(cli_pipe_ctx_struct_t *ctx) {
       DWORD pending = 0;
       DWORD n_in = 0;
 
-      if (stdin_is_pipe && PeekNamedPipe(h_stdin, NULL, 0, NULL, &pending, NULL) &&
-          pending == 0U) {
+      if (stdin_is_pipe && PeekNamedPipe(h_stdin, NULL, 0, NULL, &pending, NULL) && pending == 0U) {
         cli_sleep_ms(10U); /* nothing yet (a closed pipe fails the peek: ReadFile sees EOF) */
         continue;
       }
@@ -782,8 +781,7 @@ static int run_named_client(const char *name) {
 
   if (cli_named_pipe_connect(name, &pipe_ctx) < 0) {
     if (errno == EPERM) {
-      fprintf(stderr, "Refusing '%s.in' / '%s.out': not this user's private FIFOs\n", name,
-              name);
+      fprintf(stderr, "Refusing '%s.in' / '%s.out': not this user's private FIFOs\n", name, name);
     } else {
       perror("cli_named_pipe_connect");
       fprintf(stderr, "Failed to connect to pipe '%s' (is the server running?)\n", name);

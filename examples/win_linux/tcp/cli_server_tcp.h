@@ -6,7 +6,7 @@
  * compile-time feature switches for Telnet negotiation and raw-TCP
  * auto-newline handling.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */

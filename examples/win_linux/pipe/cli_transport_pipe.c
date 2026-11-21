@@ -5,7 +5,7 @@
  * Implements @c cli_transport_struct_t read and write callbacks for IPC pipes on
  * both Windows and POSIX platforms.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */
@@ -160,10 +160,10 @@ int32_t cli_named_pipe_listen(const char *name, cli_pipe_ctx_struct_t *ctx) {
      * instance must not wait for that. Only one instance listens at a time, so a second
      * client still finds the server busy. */
     if (win_owner_only_security(&sa)) {
-      handle = CreateNamedPipeA(
-          path, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | first,
-          PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-          PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, &sa);
+      handle = CreateNamedPipeA(path, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | first,
+                                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT |
+                                    PIPE_REJECT_REMOTE_CLIENTS,
+                                PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, &sa);
       DWORD error = GetLastError();
       LocalFree(sa.lpSecurityDescriptor);
       /* With FILE_FLAG_FIRST_PIPE_INSTANCE, access denied means the name already exists. */
@@ -615,7 +615,7 @@ static bool win_reserve_name(const char *path, void **h_lock) {
     *h_lock = (void *)mutex;
   } else {
     DWORD error = (mutex != NULL || GetLastError() == ERROR_ACCESS_DENIED) ? ERROR_ALREADY_EXISTS
-                                                                         : GetLastError();
+                                                                           : GetLastError();
     if (mutex != NULL) {
       CloseHandle(mutex); /* another server's mutex */
     }
@@ -662,8 +662,8 @@ static bool win_owner_only_security(SECURITY_ATTRIBUTES *sa) {
   PSID sid = NULL;
   LPSTR sid_text = NULL;
   char sddl[PIPE_SDDL_MAX];
-  bool ok = win_process_user(GetCurrentProcess(), &user, &sid) &&
-            ConvertSidToStringSidA(sid, &sid_text);
+  bool ok =
+      win_process_user(GetCurrentProcess(), &user, &sid) && ConvertSidToStringSidA(sid, &sid_text);
 
   if (ok) {
     /* Protected DACL: full access for this user and SYSTEM, nobody else. */
@@ -998,8 +998,8 @@ static cli_transport_ret_t cli_pipe_transport_read(void *raw) {
 
     memset(&ov, 0, sizeof(ov));
     ov.hEvent = (HANDLE)ctx->h_event;
-    ok = win_overlapped_finish(handle, &ov, ReadFile(handle, &byte, 1, NULL, &ov), INFINITE,
-                               &count);
+    ok =
+        win_overlapped_finish(handle, &ov, ReadFile(handle, &byte, 1, NULL, &ov), INFINITE, &count);
   }
   if (ok && count == 1U) {
     rc = byte;

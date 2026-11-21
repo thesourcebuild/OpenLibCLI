@@ -83,7 +83,7 @@
  *
  * @note Windows: link with @c advapi32 (access control of the named pipe).
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */

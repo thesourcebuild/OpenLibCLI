@@ -5,7 +5,7 @@
  * Implements @c cli_transport_struct_t read and write callbacks for @c AF_UNIX
  * stream sockets on POSIX platforms.
  *
- * @copyright Copyright (c) 2026 Muhammad Hassaan Shah.
+ * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
  * SPDX-License-Identifier: MIT
  */
