@@ -1100,10 +1100,16 @@ static void test_history_ring_evicts_oldest(void) {
   }
   ASSERT_TRUE(s_cli.history_count >= CLI_HISTORY_BUF_SIZE / (XS + 3) - 1);
 
+  /* The newest entries that fit next to 'history' itself (8 bytes) are listed whole; each
+   * long entry takes XS + 3 bytes. */
   out_clear();
   type("history\r");
-  ASSERT_OUT("x19");
-  ASSERT_OUT("x18");
+  if (CLI_MAX_HISTORY >= 2 && (XS + 3) + 8 <= CLI_HISTORY_BUF_SIZE) {
+    ASSERT_OUT("x19");
+  }
+  if (CLI_MAX_HISTORY >= 3 && 2 * (XS + 3) + 8 <= CLI_HISTORY_BUF_SIZE) {
+    ASSERT_OUT("x18");
+  }
   ASSERT_OUT("history");
   TEST_END();
 }
@@ -3367,11 +3373,14 @@ static void test_terminal_width_query(void) {
   type("\x1b[30;80R");
   ASSERT_EQ(cli_get_terminal_width(&s_cli), 80U);
 
-  /* An explicit width (Telnet window size) replaces a reply still to come. */
+  /* An explicit width (Telnet window size) leaves a pending query waiting: its reply, which
+   * arrives later, is still the terminal's (not typed in) and the newer width. */
   type("\x0c");
   cli_set_terminal_width(&s_cli, 100U);
-  type("\x1b[30;60R");
   ASSERT_EQ(cli_get_terminal_width(&s_cli), 100U);
+  type("\x1b[30;60R");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 60U);
+  ASSERT_EQ(s_cli.input_len, 0);
 
 #if CLI_ENABLE_AUTH
   /* A reply that arrives during the login is not typed into it. */
@@ -3422,7 +3431,61 @@ static void test_width_reply_handling(void) {
       }
     }
     ASSERT_EQ(out_count("Session restarted"), 1);
+
+    /* Nor when a Telnet window size arrives before it: nobody typed, nothing is reset. */
+    session_new();
+    cli_set_idle_timeout(&s_cli, 5U);
+    cli_set_idle_timeout_mode(&s_cli, CLI_IDLE_TIMEOUT_POLICY_RESET_SESSION);
+    session_start();
+    cli_set_terminal_width(&s_cli, 80U);
+    type("\x1b[24;80R");
+    out_clear();
+    s_now += 6U;
+    (void)run();
+    ASSERT_EQ(out_count("Session restarted"), 0);
   }
+#endif
+
+#if CLI_ENABLE_AUTH && CLI_ENABLE_TIME_SOURCE
+  /* An Esc typed during a lockout is discarded with the rest: the username typed after it
+   * is taken whole (an open ESC would turn its 'O' into a key sequence). */
+  session_new();
+  (void)cli_add_user(&s_cli, "Oscar", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_auth_failure_mode(&s_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
+  cli_set_auth_lockout_duration(&s_cli, 30U);
+  session_start();
+  type("\x1b[24;50R"
+       "x\rx\rx\rx\rx\rx\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  type("\x1b");
+  s_now += 31U;
+  (void)run();
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  type("Oscar\rpw\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_AUTHENTICATED);
+
+  /* A width reply split across the lockout's end is still taken whole. */
+  session_new();
+  (void)cli_add_user(&s_cli, "admin", "pw", CLI_PRIV_USER);
+  cli_require_authorization(&s_cli, true);
+  cli_set_auth_failure_mode(&s_cli, CLI_AUTH_FAILURE_MODE_LOCKOUT);
+  cli_set_auth_lockout_duration(&s_cli, 30U);
+  session_start();
+  type("x\rx\rx\rx\rx\rx\r");
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT);
+  type("\x0c"); /* discarded: no new query */
+  s_now += 29U;
+  cli_restart_session(&s_cli);
+  (void)run();
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_LOCKOUT); /* survives the new session, which asks */
+  type("\x1b[24;");
+  s_now += 1U; /* the lockout ends while the reply is being received */
+  (void)run();
+  ASSERT_EQ(s_cli.auth_state, CLI_AUTH_USERNAME);
+  type("45R");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 45U);
+  ASSERT_EQ(s_cli.input_len, 0);
 #endif
 
 #if CLI_ENABLE_AUTH && CLI_ENABLE_TIME_SOURCE
@@ -3477,6 +3540,32 @@ static void test_wrap_prompt_edges(void) {
   ASSERT_ROW(1, "opqrstuvwxyz0123");
   ASSERT_EQ(s_vt_row, 0);
   ASSERT_EQ(s_vt_col, 6);
+
+  /* Every kind of escape sequence takes no column, and a tab runs to the next tab stop. */
+  {
+    static const struct {
+      const char *hostname;
+      cli_len_t columns; /* of the prompt: the hostname and "> " */
+    } cases[] = {
+        {"\x1b(Brtr", 5},                    /* character set: ESC, intermediate, final */
+        {"\x1b#8rtr", 5},                    /* ESC # 8 */
+        {"\x1bPq#0\x1b\\rtr", 5},            /* DCS, closed by ESC \ */
+        {"\x1b_note\artr", 5},               /* APC, closed by BEL */
+        {"\x1b]0;title\x1b\\rtr", 5},        /* OSC, closed by ESC \ */
+        {"\x1b[1\x1b[0mrtr", 5},             /* CSI cut short by another ESC */
+        {"\x1b[1\rrtr", 5},                  /* CSI cut short by a control character */
+        {"\x1bOrtr", 5},                     /* SS3: the next character is still shown */
+        {"r\tx", 11},                        /* tab from column 1 to 8 */
+    };
+
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+      session_new();
+      ASSERT_EQ(cli_set_hostname(&s_cli, cases[k].hostname), CLI_OK);
+      cli_set_terminal_width(&s_cli, VT_WIDTH);
+      session_start();
+      ASSERT_EQ(s_cli.prompt_len, cases[k].columns);
+    }
+  }
 
   /* '?' on a line that fills its row: the help starts below it, the '?' on the row it took. */
   session_new();
@@ -3590,14 +3679,31 @@ static void test_duplicate_of_submenu_rejected(void) {
 
 /* Round 9 regressions ------------------------------------------------------------------*/
 
-/* Used by the clock-change tests below (periodic, lockout, idle). */
+/* Used by the clock-change tests below (periodic, lockout, idle, width query). */
 #if CLI_ENABLE_PERIODIC_CALLBACK || CLI_ENABLE_IDLE_TIMEOUT ||                                      \
-    (CLI_ENABLE_AUTH && CLI_ENABLE_TIME_SOURCE)
+    ((CLI_ENABLE_AUTH || CLI_ENABLE_LINE_WRAP) && CLI_ENABLE_TIME_SOURCE)
 static uint32_t s_now2; /* a second clock */
 
 static uint32_t t_now2(void *ctx) {
   (void)ctx;
   return s_now2;
+}
+#endif
+
+#if CLI_ENABLE_LINE_WRAP && CLI_ENABLE_TIME_SOURCE
+static void test_time_source_change_keeps_width_query(void) {
+  TEST_START("time_source_change_keeps_width_query");
+  session_new();
+  s_now = 1000U;
+  session_start(); /* asks for the width */
+  s_now2 = 5U;
+  cli_set_time_source(&s_cli, t_now2, NULL);
+  (void)run();
+  /* Not given up: no time has passed, whatever the new clock reads. */
+  type("\x1b[24;70R");
+  ASSERT_EQ(cli_get_terminal_width(&s_cli), 70U);
+  ASSERT_EQ(s_cli.input_len, 0);
+  TEST_END();
 }
 #endif
 
@@ -5238,6 +5344,9 @@ int main(void) {
 #endif
 #if CLI_ENABLE_AUTH && CLI_ENABLE_TIME_SOURCE
   RUN_SUITE(test_time_source_change_keeps_lockout);
+#endif
+#if CLI_ENABLE_LINE_WRAP && CLI_ENABLE_TIME_SOURCE
+  RUN_SUITE(test_time_source_change_keeps_width_query);
 #endif
 #if CLI_ENABLE_ALIASES
   RUN_SUITE(test_duplicate_sees_all_children);
