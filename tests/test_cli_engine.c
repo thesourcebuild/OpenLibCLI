@@ -719,6 +719,86 @@ static void test_submenu_privilege_ends_on_exit(void) {
   TEST_END();
 }
 
+static void test_lowered_privilege_kept_on_exit(void) {
+  TEST_START("lowered_privilege_kept_on_exit");
+  session_new();
+  session_start();
+  ASSERT_EQ(type("enable\r"), CLI_OK);
+  ASSERT_EQ(type("configure\r"), CLI_OK);
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_CONFIG);
+
+  /* The application takes the privilege away (from a timer, say): leaving the level it
+   * was saved with does not give it back. */
+  cli_set_privilege(&s_cli, CLI_PRIV_USER);
+  ASSERT_EQ(type("exit\r"), CLI_OK);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  (void)type("configure\r");
+  ASSERT_TRUE(cli_get_mode(&s_cli) != CLI_MODE_CONFIG);
+  TEST_END();
+}
+
+static cli_cmd_handle_t s_detach_target;
+
+/* Removes the submenu it is in (not recursively): it is left detached. */
+static int8_t cmd_remove_own_menu(cli_struct_t *cli, const char *cmd, cli_argc_t argc,
+                                  const char *argv[]) {
+  (void)cmd;
+  (void)argc;
+  (void)argv;
+  return cli_remove_command(cli, s_detach_target);
+}
+
+static void test_detached_command_not_entered(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("detached_command_not_entered");
+  session_new();
+  s_detach_target =
+      cli_add_command(&s_cli, CLI_CMD_ROOT, "grp", NULL, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  h = cli_add_command(&s_cli, s_detach_target, "outer", cmd_remove_own_menu, CLI_PRIV_USER,
+                      CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, h, "inner", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  session_start();
+
+  /* 'outer' detaches itself by removing 'grp': its submenu is not entered, and the
+   * subcommands below it stay out of reach. */
+  type("grp outer\r");
+  ASSERT_EQ(s_cli.context, CLI_CMD_ROOT);
+  out_clear();
+  type("inner\r");
+  ASSERT_NOT_OUT("RAN:inner");
+  TEST_END();
+}
+
+static void test_submenu_lists_reachable_commands(void) {
+  cli_cmd_handle_t h;
+
+  TEST_START("submenu_lists_reachable_commands");
+  session_new();
+  h = cli_add_command(&s_cli, CLI_CMD_ROOT, "zz", cmd_ok, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, h, "showx", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+  (void)cli_add_command(&s_cli, h, "clear", cmd_name, CLI_PRIV_USER, CLI_MODE_ANY, "");
+#if CLI_ENABLE_ALIASES
+  ASSERT_EQ(cli_cmd_add_alias(&s_cli, s_h_show, "display"), CLI_OK);
+#endif
+  session_start();
+  type("zz\r");
+
+#if CLI_ENABLE_ALIASES
+  /* 'show' is taken over by 'showx' here, but its alias still reaches it: listed by that. */
+  out_clear();
+  type("?");
+  ASSERT_OUT("display");
+  type("\x15");
+#endif
+
+  /* 'clear' here is the submenu's command: not advertised as clearing the screen. */
+  out_clear();
+  type("usage commands\r");
+  ASSERT_NOT_OUT("Clear screen");
+  TEST_END();
+}
+
 static void test_navigation_depth_limit(void) {
   TEST_START("navigation_depth_limit");
   session_new();
@@ -1495,6 +1575,29 @@ static void test_idle_callback_always_fires(void) {
   s_now += 6U;
   (void)run();
   ASSERT_EQ(s_idle_calls, 2);
+  TEST_END();
+}
+
+static int8_t idle_quit_cb(cli_struct_t *cli) {
+  (void)cli;
+  s_idle_calls++;
+  return CLI_ERR_QUIT;
+}
+
+static void test_idle_callback_end_handled_once(void) {
+  TEST_START("idle_callback_end_handled_once");
+  session_new();
+  session_start();
+  s_idle_calls = 0;
+
+  /* Checked from the main loop: a callback that ends the session ends it at once, so the
+   * next engine call does not run it again. */
+  cli_set_idle_timeout_cb(&s_cli, 10U, idle_quit_cb);
+  s_now += 11U;
+  ASSERT_EQ(cli_check_idle_timeout(&s_cli), CLI_ERR_QUIT);
+  ASSERT_EQ(cli_get_session_state(&s_cli), CLI_SESSION_STOP);
+  ASSERT_EQ(run(), CLI_ERR_QUIT);
+  ASSERT_EQ(s_idle_calls, 1);
   TEST_END();
 }
 #endif
@@ -5186,6 +5289,9 @@ int main(void) {
   RUN_SUITE(test_submenu_privilege_ends_on_exit);
   RUN_SUITE(test_submenu_privilege_after_return);
   RUN_SUITE(test_submenu_privilege_nested_removal);
+  RUN_SUITE(test_lowered_privilege_kept_on_exit);
+  RUN_SUITE(test_detached_command_not_entered);
+  RUN_SUITE(test_submenu_lists_reachable_commands);
   RUN_SUITE(test_navigation_depth_limit);
 #if CLI_ENABLE_MODE_NAMES
   RUN_SUITE(test_mode_name_for_user_mode);
@@ -5249,6 +5355,7 @@ int main(void) {
   printf("\n--- idle timeout ---\n");
 #if CLI_ENABLE_IDLE_TIMEOUT
   RUN_SUITE(test_idle_callback_always_fires);
+  RUN_SUITE(test_idle_callback_end_handled_once);
 #endif
 #if CLI_ENABLE_IDLE_TIMEOUT
   RUN_SUITE(test_idle_reset_fires_once);

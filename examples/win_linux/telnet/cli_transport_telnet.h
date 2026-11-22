@@ -33,6 +33,9 @@
  *   cli_start(&cli);
  *
  *   while (1) {
+ *       if (cli_get_session_state(&cli) == CLI_SESSION_RUN) {
+ *           (void)cli_telnet_wait(&ctx, CLI_TRANSPORT_POLL_MS); // input, or a timer
+ *       }
  *       if (cli_session_engine(&cli) != CLI_OK) break;
  *   }
  *
@@ -194,11 +197,26 @@ int32_t cli_telnet_listen(uint16_t port);
 int32_t cli_telnet_accept(int32_t listen_fd);
 
 /**
+ * @brief Wait until the client sends something, or @p timeout_ms elapses.
+ *
+ * Call it from the session loop before each @c cli_session_engine() call while the
+ * session runs: the transport's reads do not wait, so each engine call returns promptly,
+ * also while the client keeps typing (timers, the idle timeout and lockouts are checked
+ * once per call). Returns at once while decoded input or a window size is still waiting.
+ *
+ * @param[in] ctx         Telnet context (set by cli_telnet_init).
+ * @param[in] timeout_ms  Longest wait, e.g. @c CLI_TRANSPORT_POLL_MS.
+ *
+ * @return 1 when input is waiting, 0 on timeout, -1 on a socket error (the next engine call
+ *         reports it).
+ */
+int32_t cli_telnet_wait(cli_telnet_ctx_struct_t *ctx, uint32_t timeout_ms);
+
+/**
  * @brief Read raw socket data and process IAC negotiation.
  *
- * Waits up to @c CLI_TRANSPORT_POLL_MS for the socket to become readable,
- * reads the available bytes, runs the telnet IAC state machine, and
- * appends decoded user bytes to the internal rx buffer. The transport's
+ * Reads the bytes the client has sent so far, without waiting, runs the telnet IAC state
+ * machine, and appends decoded user bytes to the internal rx buffer. The transport's
  * @c available callback calls this automatically; applications normally do
  * not need to call it directly.
  *

@@ -219,7 +219,7 @@ int32_t cli_tcp_accept(int32_t listen_fd) {
 
   cli_sock_t client = accept((cli_sock_t)listen_fd, (struct sockaddr *)&peer, &peer_len);
   if (client != CLI_TCP_INVALID_SOCKET) {
-    /* Reads wait in cli_tcp_wait_readable(); the send timeout stops a client
+    /* Reads wait in the session loop (cli_tcp_wait()); the send timeout stops a client
      * that never reads its output from blocking the single-threaded server forever. */
 #if ENV_IS_WINDOWS
     BOOL nd = TRUE;
@@ -257,6 +257,31 @@ void cli_tcp_close(int32_t fd) {
     CLI_TCP_CLOSE_SOCKET((cli_sock_t)fd);
   }
 #endif
+}
+
+int32_t cli_tcp_wait(cli_tcp_ctx_struct_t *ctx, uint32_t timeout_ms) {
+  int32_t result = 1; /* received input is still waiting */
+
+#if !(ENV_IS_WINDOWS || ENV_IS_UNIX_LIKE)
+  (void)ctx;
+  (void)timeout_ms;
+  result = CLI_TCP_ERR;
+#else
+  if (ctx->rx_pos >= ctx->rx_len) {
+    result = cli_tcp_wait_readable((cli_sock_t)ctx->fd, timeout_ms);
+    if (result == 0 && ctx->auto_newline && ctx->line_open) {
+      /* The peer left a line without a terminator and stayed silent for the whole wait:
+       * the line is ended here (a command split across TCP segments is not cut in two). */
+      ctx->rx_buf[0] = '\n';
+      ctx->rx_pos = 0;
+      ctx->rx_len = 1U;
+      ctx->line_open = false;
+      result = 1;
+    }
+  }
+#endif
+
+  return result;
 }
 
 /*=======================================================================================
@@ -372,16 +397,15 @@ static cli_transport_ret_t cli_tcp_send_all(cli_sock_t socket_fd, const uint8_t 
 }
 
 /**
- * @brief Report whether a decoded byte is ready, receiving more when needed.
+ * @brief Report whether a byte is ready, receiving what the peer has sent.
  *
- * Waits up to @c CLI_TRANSPORT_POLL_MS for data. With @c auto_newline, a
- * synthetic @c '\n' is produced only when the received text does not end
- * with a line terminator and the peer then stays silent for a full poll
- * interval, so a command split across TCP segments is not cut in two.
+ * Does not wait: the server loop waits for input between engine calls (@c cli_tcp_wait()),
+ * so each @c cli_session_engine() call returns promptly also while the peer keeps typing
+ * (timers, the idle timeout and lockouts are checked once per call).
  *
  * @param[in] raw_ctx  Raw TCP context pointer.
  *
- * @return @c 1 if a byte is ready, @c 0 on timeout, or @c -1 on disconnect or error.
+ * @return @c 1 if a byte is ready, @c 0 if none, or @c -1 on disconnect or error.
  */
 static cli_transport_ret_t cli_tcp_transport_available(void *raw_ctx) {
   cli_tcp_ctx_struct_t *ctx = (cli_tcp_ctx_struct_t *)raw_ctx;
@@ -393,7 +417,7 @@ static cli_transport_ret_t cli_tcp_transport_available(void *raw_ctx) {
     ctx->rx_pos = 0;
     ctx->rx_len = 0;
 
-    int32_t ready = cli_tcp_wait_readable((cli_sock_t)ctx->fd, (uint32_t)CLI_TRANSPORT_POLL_MS);
+    int32_t ready = cli_tcp_wait_readable((cli_sock_t)ctx->fd, 0U);
     if (ready > 0) {
       cli_transport_ret_t received =
           CLI_TCP_RECV(ctx->fd, ctx->rx_buf, (int32_t)sizeof(ctx->rx_buf));
@@ -408,12 +432,7 @@ static cli_transport_ret_t cli_tcp_transport_available(void *raw_ctx) {
         rc = CLI_TCP_TRANSPORT_READ_ERR; /* orderly close (0) or socket error */
       }
     } else if (ready == 0) {
-      if (ctx->auto_newline && ctx->line_open) {
-        ctx->rx_buf[0] = '\n';
-        ctx->rx_len = 1U;
-        ctx->line_open = false;
-        rc = 1;
-      }
+      /* Nothing received yet. */
     } else {
       rc = CLI_TCP_TRANSPORT_READ_ERR;
     }

@@ -277,7 +277,7 @@ int32_t cli_telnet_accept(int32_t listen_fd) {
   cli_sock_t client = accept((cli_sock_t)listen_fd, (struct sockaddr *)&peer, &peer_len);
   if (client != CLI_TELNET_INVALID_NATIVE_SOCKET) {
 
-    /* Reads wait in cli_telnet_wait_readable(); the send timeout stops a client
+    /* Reads wait in the session loop (cli_telnet_wait()); the send timeout stops a client
      * that never reads its output from blocking the single-threaded server forever. */
 #if ENV_IS_WINDOWS
     {
@@ -312,6 +312,16 @@ void cli_telnet_close(int32_t fd) {
   }
 }
 
+int32_t cli_telnet_wait(cli_telnet_ctx_struct_t *ctx, uint32_t timeout_ms) {
+  int32_t result = 1; /* decoded input, or a window size, is still waiting */
+
+  if (ctx->rx_pos >= ctx->rx_len && !ctx->window_width_due) {
+    result = cli_telnet_wait_readable((cli_sock_t)ctx->fd, timeout_ms);
+  }
+
+  return result;
+}
+
 int8_t cli_telnet_handler(cli_telnet_ctx_struct_t *ctx) {
   int8_t result = CLI_OK;
 
@@ -320,7 +330,8 @@ int8_t cli_telnet_handler(cli_telnet_ctx_struct_t *ctx) {
     int32_t ready = 0;
 
     if (room > 0) {
-      ready = cli_telnet_wait_readable((cli_sock_t)ctx->fd, (uint32_t)CLI_TRANSPORT_POLL_MS);
+      /* What the client has sent so far: the session loop waits (cli_telnet_wait()). */
+      ready = cli_telnet_wait_readable((cli_sock_t)ctx->fd, 0U);
       if (ready < 0) {
         result = CLI_ERR;
       }

@@ -203,6 +203,12 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
   cli_start(cli);
   int8_t rc;
   while (1) {
+    /* Wait up to a second for input (timers still run in between). Not before the banner
+     * and the first prompt, which are shown at once. */
+    if (cli_get_session_state(cli) == CLI_SESSION_RUN) {
+      (void)cli_telnet_wait((cli_telnet_ctx_struct_t *)cli->transport.ctx,
+                            (uint32_t)CLI_TRANSPORT_POLL_MS);
+    }
     rc = cli_session_engine(cli);
     if (rc != CLI_OK) {
       cli->session_state = CLI_SESSION_STOP;

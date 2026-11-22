@@ -29,6 +29,9 @@
  *       cli_start(&cli);
  *
  *       while (1) {
+ *           if (cli_get_session_state(&cli) == CLI_SESSION_RUN) {
+ *               (void)cli_tcp_wait(&tcp_ctx, CLI_TRANSPORT_POLL_MS); // input, or a timer
+ *           }
  *           if (cli_session_engine(&cli) != CLI_OK) break;
  *       }
  *
@@ -131,8 +134,8 @@ int32_t cli_tcp_listen(uint16_t port);
  *
  * Sets @c TCP_NODELAY (disables Nagle algorithm for low-latency character
  * echo) and @c SO_SNDTIMEO (@c CLI_TCP_SEND_TIMEOUT_MS) on the accepted socket;
- * on macOS also @c SO_NOSIGPIPE. Reads wait (@c poll() on POSIX, @c select() on
- * Windows) for up to @c CLI_TRANSPORT_POLL_MS.
+ * on macOS also @c SO_NOSIGPIPE. Reads do not wait: the server loop waits for input with
+ * @c cli_tcp_wait().
  *
  * @param[in] listen_fd  Fd returned by @c cli_tcp_listen().
  *
@@ -146,7 +149,7 @@ int32_t cli_tcp_accept(int32_t listen_fd);
  * This exposes a plain stream socket to the CLI core without Telnet IAC
  * negotiation. When @p auto_newline is @c true, the transport submits a line
  * that the peer left without @c '\r' / @c '\n' once no further data arrives
- * for @c CLI_TRANSPORT_POLL_MS (for line-oriented clients that omit the
+ * during a whole @c cli_tcp_wait() (for line-oriented clients that omit the
  * terminator). Leave it @c false for interactive, character-at-a-time clients.
  *
  * @param[out] ctx           Caller-allocated context that must outlive the session.
@@ -166,6 +169,24 @@ void cli_tcp_init(cli_tcp_ctx_struct_t *ctx, cli_transport_struct_t *transport, 
  * @param[in] fd  Socket fd to close.
  */
 void cli_tcp_close(int32_t fd);
+
+/**
+ * @brief Wait until the peer sends something, or @p timeout_ms elapses.
+ *
+ * Call it from the session loop before each @c cli_session_engine() call while the
+ * session runs: the transport's reads do not wait, so each engine call returns promptly,
+ * also while the peer keeps typing (timers, the idle timeout and lockouts are checked once
+ * per call). Returns at once while received input is still waiting. With
+ * @c auto_newline, a line the peer left open is ended when nothing arrives during the
+ * whole wait.
+ *
+ * @param[in,out] ctx         Context initialised by @c cli_tcp_init().
+ * @param[in]     timeout_ms  Longest wait, e.g. @c CLI_TRANSPORT_POLL_MS.
+ *
+ * @return 1 when input is waiting, 0 on timeout, -1 on a socket error (the next engine call
+ *         reports it).
+ */
+int32_t cli_tcp_wait(cli_tcp_ctx_struct_t *ctx, uint32_t timeout_ms);
 
 /** @} */
 
