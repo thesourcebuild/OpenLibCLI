@@ -1518,6 +1518,39 @@ static void test_auth_callback_sets_privilege(void) {
   ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
   TEST_END();
 }
+
+static int8_t auth_cb_enters_config(cli_struct_t *cli, const char *user, const char *pass) {
+  (void)pass;
+  if (strcmp(user, "root") == 0) {
+    cli_set_privilege(cli, CLI_PRIV_PRIVILEGED);
+  }
+  (void)cli_set_mode(cli, CLI_MODE_CONFIG);
+  return CLI_OK;
+}
+
+/* A login starts at its floor (privileged or user exec), whatever mode its callback entered:
+ * no level below it for 'exit' to return to. */
+static void test_login_floor_after_callback_mode(void) {
+  TEST_START("login_floor_after_callback_mode");
+  session_new();
+  cli_set_authorization_cb(&s_cli, auth_cb_enters_config);
+  cli_require_authorization(&s_cli, true);
+  session_start();
+  type("root\rpw\r");
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_ENABLE);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_PRIVILEGED);
+  ASSERT_EQ(type("exit\r"), CLI_ERR_QUIT);
+
+  session_new();
+  cli_set_authorization_cb(&s_cli, auth_cb_enters_config);
+  cli_require_authorization(&s_cli, true);
+  session_start();
+  type("bob\rpw\r");
+  ASSERT_EQ(cli_get_mode(&s_cli), CLI_MODE_EXEC);
+  ASSERT_EQ(cli_get_privilege(&s_cli), CLI_PRIV_USER);
+  ASSERT_EQ(type("exit\r"), CLI_ERR_QUIT);
+  TEST_END();
+}
 #endif
 
 /*=======================================================================================
@@ -3918,6 +3951,26 @@ static void test_error_after_callback_output(void) {
   TEST_END();
 }
 
+/* Line endings in an error message are written as in command output (cli_println()): a '\n'
+ * starts a new line, a '\r' is dropped; print_transport_cb receives the lines one by one. */
+static void test_error_line_endings(void) {
+  TEST_START("error_line_endings");
+  session_new();
+  session_start();
+
+  (void)cli_error(&s_cli, "a\nb\r");
+  ASSERT_OUT("% a\r\nb\r\n");
+  ASSERT_NOT_OUT("\r\r");
+#if CLI_ENABLE_PRINT_TRANSPORT_CB
+  s_lines[0] = '\0';
+  cli_set_print_transport_cb(&s_cli, t_line);
+  (void)cli_error(&s_cli, "x\ny");
+  ASSERT_STR_EQ(s_lines, "<% x><y>");
+  cli_set_print_transport_cb(&s_cli, NULL);
+#endif
+  TEST_END();
+}
+
 #if CLI_ENABLE_IDLE_TIMEOUT
 static void test_idle_reset_message_placement(void) {
   TEST_START("idle_reset_message_placement");
@@ -5350,6 +5403,7 @@ int main(void) {
 #endif
 #if CLI_ENABLE_AUTH
   RUN_SUITE(test_auth_callback_sets_privilege);
+  RUN_SUITE(test_login_floor_after_callback_mode);
 #endif
 
   printf("\n--- idle timeout ---\n");
@@ -5471,6 +5525,7 @@ int main(void) {
   RUN_SUITE(test_duplicate_sees_all_children);
 #endif
   RUN_SUITE(test_error_after_callback_output);
+  RUN_SUITE(test_error_line_endings);
 #if CLI_ENABLE_IDLE_TIMEOUT
   RUN_SUITE(test_idle_reset_message_placement);
 #endif

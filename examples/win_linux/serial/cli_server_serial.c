@@ -27,9 +27,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#include <conio.h>
 #elif ENV_IS_UNIX_LIKE
-#include <poll.h>
 #include <signal.h>
 #include <sys/time.h>
 #include <termios.h>
@@ -183,8 +181,9 @@ int main(void) {
 /**
  * @brief Blocking session loop runs @c cli_session_engine() until exit.
  *
- * Waits for stdin data with a 1-second timeout each iteration so idle
- * timeout and periodic callbacks can fire between keystrokes.
+ * Waits for stdin data up to @c CLI_TRANSPORT_POLL_MS each iteration
+ * (@c cli_serial_wait()) so idle timeout and periodic callbacks can fire between
+ * keystrokes.
  *
  * @param[in] cli  Active CLI session.
  *
@@ -196,21 +195,7 @@ static int8_t cli_server_loop(cli_struct_t *cli) {
   while (1) {
     /* The banner and the first prompt are shown at once; afterwards wait for a key. */
     if (cli_get_session_state(cli) == CLI_SESSION_RUN) {
-#if ENV_IS_WINDOWS
-      DWORD start = GetTickCount();
-      while (!_kbhit()) {
-        if (GetTickCount() - start >= 1000) {
-          break;
-        }
-        Sleep(1);
-      }
-#else
-      struct pollfd pfd;
-      pfd.fd = STDIN_FILENO;
-      pfd.events = POLLIN;
-      pfd.revents = 0;
-      (void)poll(&pfd, 1, 1000);
-#endif
+      (void)cli_serial_wait((uint32_t)CLI_TRANSPORT_POLL_MS); /* input, or a timer */
     }
     rc = cli_session_engine(cli);
     if (rc != CLI_OK) {

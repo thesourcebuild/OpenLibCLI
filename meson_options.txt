@@ -9,4 +9,4 @@ option('BUILD_EXAMPLE_TCP', type : 'boolean', value : false,
 option('BUILD_EXAMPLE_PIPE', type : 'boolean', value : false,
        description : 'Build pipe transport example (cli_server_pipe)')
 option('BUILD_EXAMPLE_UNIX_SOCKET', type : 'boolean', value : false,
-       description : 'Build UNIX socket example (cli_server_unix_socket, Linux only)')
+       description : 'Build UNIX socket example (cli_server_unix_socket, POSIX only)')

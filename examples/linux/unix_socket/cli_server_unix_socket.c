@@ -372,6 +372,7 @@ static int run_server(const char *path) {
       }
 
       printf("Client connected (session %u)\n", (unsigned)++session_num);
+      fflush(stdout);
 
       static cli_unix_socket_ctx_struct_t sock_ctx;
       static cli_transport_struct_t transport;
@@ -383,6 +384,7 @@ static int run_server(const char *path) {
       setup_session(&demo_cli, session_num);
       int8_t rc = cli_server_loop(&demo_cli);
       printf("Session %u ended (rc=%d)\n", (unsigned)session_num, rc);
+      fflush(stdout);
 
       cli_done(&demo_cli);
       cli_unix_close(conn_fd);
@@ -390,6 +392,7 @@ static int run_server(const char *path) {
 
     cli_unix_listener_close(&listener, path);
     printf("Server stopped; removed %s\n", path);
+    fflush(stdout);
   }
 
   return status;

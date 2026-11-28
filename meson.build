@@ -181,8 +181,8 @@ if get_option('BUILD_EXAMPLES')
     )
   endif
 
-  # UNIX socket (Linux only)
-  if is_linux and get_option('BUILD_EXAMPLE_UNIX_SOCKET')
+  # UNIX socket (every POSIX host: Linux, macOS, the BSDs; as in CMake and the Makefile)
+  if not is_windows and get_option('BUILD_EXAMPLE_UNIX_SOCKET')
     executable('cli_server_unix_socket',
         'examples/linux/unix_socket/cli_server_unix_socket.c',
         'examples/linux/unix_socket/cli_transport_unix_socket.c',

@@ -234,19 +234,19 @@ BUILD_LIB_SHARED  ?= 1
 # ---------------------------------------------------------------------------
 #  Output targets
 # ---------------------------------------------------------------------------
-STATIC_LIB_OUT := $(LIB_DIR)/libopenlibcli.a
+STATIC_LIB_OUT := $(LIB_DIR)/libOpenLibCLI.a
 ifeq ($(PLATFORM),windows)
 SHARED_LIB_OUT := $(LIB_DIR)/OpenLibCLI.dll
-SHARED_IMPLIB_OUT := $(LIB_DIR)/libopenlibcli.dll.a
+SHARED_IMPLIB_OUT := $(LIB_DIR)/libOpenLibCLI.dll.a
 SHARED_LINK_FLAGS := -shared -Wl,--out-implib,$(SHARED_IMPLIB_OUT)
 else ifeq ($(PLATFORM),macos)
-SHARED_LIB_OUT := $(LIB_DIR)/libopenlibcli.dylib
+SHARED_LIB_OUT := $(LIB_DIR)/libOpenLibCLI.dylib
 SHARED_IMPLIB_OUT :=
-SHARED_LINK_FLAGS := -dynamiclib -install_name @rpath/libopenlibcli.dylib
+SHARED_LINK_FLAGS := -dynamiclib -install_name @rpath/libOpenLibCLI.dylib
 else
-SHARED_LIB_OUT := $(LIB_DIR)/libopenlibcli.so
+SHARED_LIB_OUT := $(LIB_DIR)/libOpenLibCLI.so
 SHARED_IMPLIB_OUT :=
-SHARED_LINK_FLAGS := -shared -Wl,-soname,libopenlibcli.so
+SHARED_LINK_FLAGS := -shared -Wl,-soname,libOpenLibCLI.so
 endif
 
 # Copy of the shared library next to the examples (a Windows DLL is found there).
@@ -262,9 +262,9 @@ EXAMPLE_LIB_DEFS := -DCLI_SHARED
 ifeq ($(PLATFORM),windows)
 LIB_LINK := $(SHARED_LIB_OUT)
 else ifeq ($(PLATFORM),macos)
-LIB_LINK := -L$(LIB_DIR) -lopenlibcli -Wl,-rpath,@loader_path/../libs
+LIB_LINK := -L$(LIB_DIR) -lOpenLibCLI -Wl,-rpath,@loader_path/../libs
 else
-LIB_LINK := -L$(LIB_DIR) -lopenlibcli -Wl,-rpath,'$$ORIGIN/../libs'
+LIB_LINK := -L$(LIB_DIR) -lOpenLibCLI -Wl,-rpath,'$$ORIGIN/../libs'
 endif
 else
 LIB_OUT          := $(STATIC_LIB_OUT)
@@ -564,7 +564,7 @@ cli_server_unix_socket unix-socket:
 endif
 
 # ---------------------------------------------------------------------------
-#  Embedded cross-compile target  →  build/gcc/embedded-baremetal/libs/libopenlibcli.a
+#  Embedded cross-compile target  →  build/gcc/embedded-baremetal/libs/libOpenLibCLI.a
 #
 #  Usage (CC: the cross-compiler, TARGET_FLAGS: the MCU's CPU flags; both required):
 #    make CC=arm-none-eabi-gcc TARGET_FLAGS="-mcpu=cortex-m4 -mthumb" embedded-baremetal

@@ -457,6 +457,7 @@ static int run_named_server(const char *name) {
       listening = false;
     } else {
       printf("Client connected (session %u)\n", ++session_num);
+      fflush(stdout);
 
       cli_pipe_init(&pipe_ctx, &transport);
       cli_init(&demo_cli, "pipe-router", &transport, NULL, demo_cmd_pool, CLI_MAX_COMMANDS);
@@ -466,6 +467,7 @@ static int run_named_server(const char *name) {
       cli_set_idle_timeout_mode(&demo_cli, CLI_IDLE_TIMEOUT_POLICY_CLOSE);
       int8_t rc = cli_server_loop(&demo_cli);
       printf("Session %u ended (rc=%d)\n", session_num, rc);
+      fflush(stdout);
 
       cli_done(&demo_cli);
       cli_named_pipe_disconnect(&pipe_ctx);

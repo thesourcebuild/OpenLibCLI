@@ -3,8 +3,11 @@
  * @brief Host serial stdin/stdout transport for OpenLibCLI.
  *
  * Provides a host-side serial transport that reads from stdin and writes to
- * stdout on Windows and Unix-like systems. A POSIX file-descriptor transport
- * is also declared here for ptys, pipes, and similar stream endpoints.
+ * stdout on Windows and Unix-like systems, also when they are redirected to a file
+ * or a pipe. On Windows a console stdin is read as key events: the arrows, Home,
+ * End and Delete arrive as the VT100 sequences the CLI understands. A POSIX
+ * file-descriptor transport is also declared here for ptys, pipes, and similar
+ * stream endpoints.
  *
  * @copyright Copyright (c) 2026 thesourcebuild and Muhammad Hassaan Shah
  *
@@ -78,6 +81,20 @@ typedef struct {
  * @param[out] transport  Filled with @c read, @c write, and @c flush callbacks.
  */
 void cli_serial_init(cli_transport_struct_t *transport);
+
+/**
+ * @brief Wait until stdin has input, or @p timeout_ms elapses.
+ *
+ * Call it from the session loop before each @c cli_session_engine() call while the
+ * session runs: the transport's reads do not wait, so each engine call returns promptly
+ * (timers, the idle timeout and lockouts are checked once per call). Returns at once while
+ * input is waiting, and at the end of a redirected input (the next engine call reports it).
+ *
+ * @param[in] timeout_ms  Longest wait, e.g. @c CLI_TRANSPORT_POLL_MS.
+ *
+ * @return 1 when input is waiting, 0 on timeout, -1 on an error or at the end of the input.
+ */
+int32_t cli_serial_wait(uint32_t timeout_ms);
 
 #if ENV_IS_UNIX_LIKE
 /**

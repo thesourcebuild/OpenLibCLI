@@ -3,6 +3,15 @@ project(OpenLibCLI C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# Feature-test macros, as in the Makefile and meson.build: with C extensions off (-std=c99)
+# glibc / musl hide POSIX (nanosleep, clock_gettime, sigaction, ...) and the BSD extras the
+# examples use (flock); _DEFAULT_SOURCE gives the system's normal set back. macOS and the
+# BSDs show everything without a macro. Chosen by the target system, so a cross build for
+# Linux gets it too.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_compile_definitions(_DEFAULT_SOURCE)
+endif()
 # Before include(CTest), which would otherwise define BUILD_TESTING as ON first.
 option(BUILD_TESTING "Build the test suite" OFF)
 include(CTest)

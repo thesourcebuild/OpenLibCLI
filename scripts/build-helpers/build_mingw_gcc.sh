@@ -160,7 +160,7 @@ show_help() {
     echo "  tcp              TCP server example"
     echo "  uart             Serial server example (stdin simulation)"
     echo "  asan             Build everything with AddressSanitizer"
-    echo "  embedded         Cross-compile -> build/gcc/embedded-baremetal/libs/libopenlibcli.a"
+    echo "  embedded         Cross-compile -> build/gcc/embedded-baremetal/libs/libOpenLibCLI.a"
     echo "  run-telnet [P]   Build + run telnet server on port P"
     echo "  run-tcp [P]      Build + run TCP server on port P"
     echo "  run-serial       Build + run serial demo"
@@ -216,7 +216,7 @@ for TARGET in "${TARGETS[@]}"; do
             echo ""
             "$MAKE_CMD" CC="${CC:-gcc}" PLATFORM="embedded-baremetal" \
                         ${BUILD_VARS[@]+"${BUILD_VARS[@]}"} embedded-baremetal
-            ok "Embedded library: build/gcc/embedded-baremetal/libs/libopenlibcli.a"
+            ok "Embedded library: build/gcc/embedded-baremetal/libs/libOpenLibCLI.a"
             ;;
 
         clean|clean-all|clean-asan|distclean|lib|shared|all|asan|cli_server_telnet|cli_server_tcp|telnet|tcp|cli_server_serial|uart|cli_server_pipe|pipe|cli_server_unix_socket|unix-socket|run-telnet|run-tcp|run-serial|run-pipe|run-unix-socket)
